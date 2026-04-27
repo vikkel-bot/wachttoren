@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from datetime import datetime
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from watchtower.domain import EntrySignal, MarketSnapshot, OutcomeEvaluation
+from watchtower.services.assets import ListedAssetUniverse
+from watchtower.services.colony import ColonyBridge
+from watchtower.services.connectors import ConnectorRegistry
+from watchtower.services.exchanges import ExchangeUniverse, TradingSessionDetector
+from watchtower.services.intermarket import IntermarketEngine
+from watchtower.services.market_context import MarketContextEngine
+from watchtower.services.news_radar import NewsRadar
+from watchtower.services.regional_scoring import RegionalEntryScorer
+from watchtower.services.scoring import EntryScorer
+from watchtower.storage import SQLiteStore
+
+
+class ConnectorTests(unittest.TestCase):
+    def test_mock_news_connector_returns_events(self) -> None:
+        events = ConnectorRegistry().fetch_news("mock-news", "AAPL", limit=2, exchange="NASDAQ")
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].asset, "AAPL")
+        self.assertGreater(events[0].relevance, 0.5)
+
+    def test_mock_market_connector_is_exchange_aware(self) -> None:
+        snapshot = ConnectorRegistry().fetch_market("mock-market", "AAPL", exchange="NASDAQ")
+
+        self.assertEqual(snapshot.asset, "AAPL")
+        self.assertGreaterEqual(snapshot.volume_zscore, 2.0)
+
+
+class WatchlistStorageTests(unittest.TestCase):
+    def test_watchlist_roundtrip(self) -> None:
+        db_path = Path.cwd() / f"test_watchlist_roundtrip_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+
+            item = store.upsert_watchlist_item(
+                {
+                    "exchange": "NASDAQ",
+                    "asset": "aapl",
+                    "region": "North America",
+                    "currency": "USD",
+                    "enabled": True,
+                    "min_entry_score": 0.72,
+                    "min_confidence": 0.6,
+                    "max_signals_per_hour": 4,
+                    "notes": "core equity",
+                }
+            )
+
+            self.assertEqual(item["key"], "NASDAQ:AAPL")
+            self.assertEqual(store.get_watchlist_item("AAPL", exchange="NASDAQ")["min_entry_score"], 0.72)
+            self.assertEqual(len(store.list_watchlist(enabled_only=True, exchange="NASDAQ")), 1)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_learning_summary_calculates_hit_rate(self) -> None:
+        db_path = Path.cwd() / f"test_learning_summary_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+            signal = {
+                "id": "sig_1",
+                "event_id": "evt_1",
+                "asset": "AAPL",
+                "exchange": "NASDAQ",
+                "region": "North America",
+                "direction": "long",
+                "entry_score": 0.8,
+                "confidence": 0.7,
+                "time_window": "15m",
+                "reason": "test",
+                "risk_flags": [],
+                "components": {},
+                "created_at": "2026-04-26T10:00:00+00:00",
+            }
+            store.save_signal(signal)
+            store.save_outcome(
+                OutcomeEvaluation(
+                    signal_id="sig_1",
+                    window="15m",
+                    entry_price=100,
+                    future_price=101,
+                    return_pct=1.0,
+                    hit=True,
+                )
+            )
+
+            summary = store.learning_summary()
+
+            self.assertEqual(summary["total_outcomes"], 1)
+            self.assertEqual(summary["hit_rate"], 1.0)
+            self.assertEqual(summary["by_asset"]["AAPL"]["avg_return_pct"], 1.0)
+            self.assertEqual(summary["by_exchange"]["NASDAQ"]["hit_rate"], 1.0)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+
+class ExchangeUniverseTests(unittest.TestCase):
+    def test_universe_includes_target_regions(self) -> None:
+        universe = ExchangeUniverse()
+
+        codes = {exchange["code"] for exchange in universe.list()}
+
+        self.assertIn("AEX", codes)
+        self.assertIn("NASDAQ", codes)
+        self.assertIn("HKEX", codes)
+        self.assertIn("JSE", codes)
+        self.assertIn("COMEX", codes)
+
+    def test_exchange_session_detects_regular_trading(self) -> None:
+        universe = ExchangeUniverse()
+        detector = TradingSessionDetector(universe)
+        moment = datetime(2026, 4, 27, 10, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+
+        status = detector.status("AEX", moment)
+
+        self.assertTrue(status["is_trading"])
+        self.assertTrue(status["is_regular"])
+        self.assertEqual(status["session"], "regular")
+
+    def test_exchange_session_detects_weekend(self) -> None:
+        universe = ExchangeUniverse()
+        detector = TradingSessionDetector(universe)
+        moment = datetime(2026, 4, 26, 10, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+
+        status = detector.status("AEX", moment)
+
+        self.assertFalse(status["is_trading"])
+        self.assertEqual(status["reason"], "weekend")
+
+    def test_listed_asset_resolves_by_exchange(self) -> None:
+        universe = ExchangeUniverse()
+        assets = ListedAssetUniverse(universe)
+
+        resolved = assets.resolve("ASML reports stronger demand", exchange="AEX")
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["key"], "AEX:ASML")
+
+    def test_listed_assets_distinguish_equities_and_commodities(self) -> None:
+        universe = ExchangeUniverse()
+        assets = ListedAssetUniverse(universe)
+
+        equities = assets.list(asset_class="equity")
+        commodities = assets.list(asset_class="commodity")
+
+        self.assertTrue(any(item["key"] == "NASDAQ:AAPL" for item in equities))
+        self.assertTrue(any(item["key"] == "COMEX:GOLD" for item in commodities))
+
+
+class RegionalScoringTests(unittest.TestCase):
+    def test_regional_scorer_adds_exchange_context(self) -> None:
+        universe = ExchangeUniverse()
+        detector = TradingSessionDetector(universe)
+        scorer = RegionalEntryScorer(EntryScorer(), detector)
+        event = ConnectorRegistry().fetch_news("mock-news", "AAPL", limit=1, exchange="NASDAQ")[0]
+        market = ConnectorRegistry().fetch_market("mock-market", "AAPL", exchange="NASDAQ")
+
+        signal = scorer.score(event, market, universe.require("NASDAQ"), asset_info={"sector": "Technology"})
+
+        self.assertEqual(signal["exchange"], "NASDAQ")
+        self.assertEqual(signal["region"], "North America")
+        self.assertIn("market_session", signal)
+        self.assertEqual(signal["sector"], "Technology")
+
+    def test_intermarket_engine_links_copper_to_technology(self) -> None:
+        universe = ExchangeUniverse()
+        market = ConnectorRegistry().fetch_market("mock-market", "COPPER", exchange="LME")
+
+        context = IntermarketEngine().context(
+            {"symbol": "COPPER", "asset_class": "commodity", "sector": "Base Metals"},
+            universe.require("LME"),
+            market,
+        )
+
+        self.assertIn("industrial_growth", context["drivers"])
+        self.assertIn("AEX:ASML", context["linked_assets"])
+        self.assertIn("data_centers", context["drivers"])
+
+    def test_intermarket_dashboard_links_include_effects(self) -> None:
+        links = IntermarketEngine().dashboard_links()
+
+        self.assertTrue(any(link["theme"] == "Electrification and infrastructure" for link in links))
+        self.assertTrue(all(link.get("effect") for link in links))
+
+
+class NewsRadarTests(unittest.TestCase):
+    def test_mock_scan_stays_inside_starter_budget(self) -> None:
+        radar = NewsRadar(ListedAssetUniverse(ExchangeUniverse()), monthly_budget_eur=25.0)
+
+        report = radar.scan(mode="mock", limit=4)
+
+        self.assertEqual(report["budget"]["estimated_monthly_cost_eur"], 0.0)
+        self.assertLessEqual(report["budget"]["estimated_monthly_cost_eur"], 25.0)
+        self.assertGreater(report["count"], 0)
+        self.assertTrue(any(event.metadata["radar"]["impact"] in {"high", "medium"} for event in report["events"]))
+
+    def test_news_radar_links_headlines_to_themes_and_assets(self) -> None:
+        radar = NewsRadar(ListedAssetUniverse(ExchangeUniverse()))
+
+        report = radar.scan(mode="mock", limit=4)
+        copper_event = next(event for event in report["events"] if "Copper jumps" in event.headline)
+
+        self.assertEqual(copper_event.asset, "COPPER")
+        self.assertIn("metals", copper_event.metadata["radar"]["themes"])
+        self.assertIn("technology", copper_event.metadata["radar"]["themes"])
+
+
+class RegimeTests(unittest.TestCase):
+    def test_volatile_regime_report(self) -> None:
+        report = MarketContextEngine().regime_report(
+            MarketSnapshot(asset="BTC", price=65000, volatility_zscore=3.0, trend_1d=0.1)
+        )
+
+        self.assertEqual(report["regime"], "volatile")
+        self.assertIn("volatility_zscore_above_2_5", report["drivers"])
+
+
+class ColonyBridgeTests(unittest.TestCase):
+    def test_colony_filters_by_watchlist_thresholds(self) -> None:
+        bridge = ColonyBridge()
+        signals = [
+            {
+                "id": "sig_good",
+                "asset": "AAPL",
+                "direction": "long",
+                "entry_score": 0.82,
+                "confidence": 0.71,
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "sig_low",
+                "asset": "AAPL",
+                "direction": "long",
+                "entry_score": 0.5,
+                "confidence": 0.71,
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            },
+        ]
+        watchlist = [
+            {
+                "asset": "AAPL",
+                "enabled": True,
+                "min_entry_score": 0.7,
+                "min_confidence": 0.6,
+            }
+        ]
+
+        qualified = bridge.qualified_signals(signals, watchlist)
+
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(qualified[0]["id"], "sig_good")
+
+
+if __name__ == "__main__":
+    unittest.main()
