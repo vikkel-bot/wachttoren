@@ -264,6 +264,14 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/backtest/signals?asset_class=crypt
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/backtest/signals?exchange=BITVAVO&from=2026-04-01T00:00:00Z"
 ```
 
+Historische seed-signalen kunnen apart van de live store worden opgebouwd uit EODHD nieuws + Alpha Vantage sentiment. De seed file staat in `data/backtest_signals_seed.jsonl`.
+
+```powershell
+python scripts/seed_backtest_signals.py --from 2026-03-01T00:00:00Z --to 2026-04-28T00:00:00Z --assets BTC-EUR,ETH-EUR,SOL-EUR --exchange BITVAVO --dry-run
+python scripts/seed_backtest_signals.py --from 2026-03-01T00:00:00Z --to 2026-04-28T00:00:00Z --assets BTC-EUR,ETH-EUR,SOL-EUR --exchange BITVAVO
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/backtest/signals/seed?asset=BTC-EUR&min_entry_score=0.5"
+```
+
 ### 6. Dashboard
 
 ```powershell

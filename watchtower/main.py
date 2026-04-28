@@ -40,6 +40,7 @@ from watchtower.services.providers import ProviderRegistry
 from watchtower.services.regional_scoring import RegionalEntryScorer
 from watchtower.services.resolver import AssetResolver
 from watchtower.services.scoring import EntryScorer
+from watchtower.services.seed_signals import filter_seed_signals, read_seed_signals
 from watchtower.storage import SQLiteStore, to_jsonable
 
 
@@ -631,6 +632,37 @@ def backtest_signals(
             "to": to_ts,
         },
         "signals": normalized,
+    }
+
+
+@app.get("/backtest/signals/seed")
+def list_seed_signals(
+    asset: str | None = None,
+    from_dt: str | None = None,
+    to_dt: str | None = None,
+    min_entry_score: float = Query(default=0.0, ge=0.0, le=1.0),
+    limit: int = Query(default=250, ge=1, le=1000),
+) -> dict:
+    signals = filter_seed_signals(
+        read_seed_signals(),
+        asset=resolver.resolve(asset) if asset else None,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        min_entry_score=min_entry_score,
+        limit=limit,
+    )
+    return {
+        "source": "watchtower",
+        "export_type": "seed_signals",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(signals),
+        "filters": {
+            "asset": resolver.resolve(asset) if asset else None,
+            "from_dt": from_dt,
+            "to_dt": to_dt,
+            "min_entry_score": min_entry_score,
+        },
+        "signals": signals,
     }
 
 
