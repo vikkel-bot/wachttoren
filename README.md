@@ -5,7 +5,7 @@ Watchtower is een losse entry-intelligence service. Hij verzamelt events en mark
 ## Wat zit erin
 
 - FastAPI service met health, event, market, signal en outcome endpoints
-- Connectorlaag voor mock news, publieke RSS-feeds, Alpha Vantage/Alpaca nieuws, mock market snapshots en public Bitvavo crypto market-data
+- Connectorlaag voor mock news, publieke RSS-feeds, Alpha Vantage/EODHD nieuws, mock market snapshots en public Bitvavo crypto market-data
 - News Radar voor GDELT/RSS/officiele headlines binnen een EUR25-maandbudget
 - Exchange Universe voor AEX, Nasdaq, grote Aziatische beurzen en Afrikaanse beurzen
 - Regionale watchlist met thresholds per exchange + asset
@@ -145,16 +145,15 @@ Voor historische news/sentiment providers zet je lokaal in `.env`:
 
 ```text
 ALPHAVANTAGE_API_KEY=<jouw-key>
-ALPACA_API_KEY=<jouw-key>
-ALPACA_API_SECRET=<jouw-secret>
+EODHD_API_KEY=<jouw-key>
 ```
 
-`.env` wordt niet gecommit. Gebruik `.env.example` als template. Alpha Vantage heeft in de gratis tier een kleine daglimiet; Watchtower houdt daarom lokaal een teller bij in `data/alphavantage_requests.json`.
+`.env` wordt niet gecommit. Gebruik `.env.example` als template. Alpha Vantage en EODHD hebben in de gratis tier kleine daglimieten; Watchtower houdt daarom lokaal tellers bij in `data/alphavantage_requests.json` en `data/eodhd_requests.json`.
 
-Historisch Alpaca nieuws ophalen en opslaan:
+Historisch EODHD nieuws ophalen en opslaan:
 
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/news/historical?asset=AAPL&connector=alpaca-news&from_dt=2026-04-01T00:00:00Z&to_dt=2026-04-28T00:00:00Z&limit=200"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/news/historical?asset=AAPL&connector=eodhd-news&from_dt=2026-04-01T00:00:00Z&to_dt=2026-04-28T00:00:00Z&limit=200"
 ```
 
 Alpha Vantage nieuws met sentiment ophalen en opslaan:
@@ -307,7 +306,7 @@ Geimplementeerd voor deze MVP:
 - `mock-news`
 - `mock-regional-news`
 - `alphavantage-news`
-- `alpaca-news`
+- `eodhd-news`
 - `mock-market`
 - `mock-regional-market`
 - `bitvavo-public`

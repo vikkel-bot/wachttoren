@@ -41,9 +41,9 @@ class ProviderRegistry:
             },
             {
                 "name": "eodhd",
-                "types": ["quotes", "bars", "fundamentals"],
-                "status": "planned",
+                "types": ["news", "quotes", "bars", "fundamentals"],
+                "status": "partially_implemented",
                 "requires": ["EODHD_API_KEY"],
-                "best_for": ["delayed global exchange coverage"],
+                "best_for": ["historical financial news", "delayed global exchange coverage"],
             },
         ]

@@ -117,14 +117,21 @@ def _parse_alpha_datetime(value: str | None) -> datetime:
     return utc_now()
 
 
-def _parse_iso_datetime(value: str | None) -> datetime:
+def _parse_eodhd_datetime(value: str | None) -> datetime:
     if not value:
         return utc_now()
+    normalized = value.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
-        return utc_now()
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return utc_now()
 
 
 def _alpha_time_param(value: datetime | None) -> str | None:
@@ -309,44 +316,53 @@ class AlphaVantageNewsConnector:
             return json.loads(response.read().decode("utf-8"))
 
 
-class AlpacaNewsConnector:
-    """Historical news via Alpaca Markets News API."""
+class EODHDNewsConnector:
+    """Historical financial news via EODHD Financial News API."""
 
-    BASE_URL = "https://data.alpaca.markets/v1beta1/news"
-    CRYPTO_TICKERS = {
-        "BTC-EUR": "BTC/USD",
-        "BTC": "BTC/USD",
-        "ETH-EUR": "ETH/USD",
-        "ETH-BTC": "ETH/USD",
-        "ETH": "ETH/USD",
-        "SOL-EUR": "SOL/USD",
-        "SOL": "SOL/USD",
+    BASE_URL = "https://eodhd.com/api/news"
+    TICKERS = {
+        "BTC-EUR": "BTC-USD.CC",
+        "BTC": "BTC-USD.CC",
+        "ETH-EUR": "ETH-USD.CC",
+        "ETH-BTC": "ETH-USD.CC",
+        "ETH": "ETH-USD.CC",
+        "SOL-EUR": "SOL-USD.CC",
+        "SOL": "SOL-USD.CC",
+        "AAPL": "AAPL.US",
+        "ASML": "ASML.AS",
     }
 
     def __init__(
         self,
         api_key: str | None = None,
-        api_secret: str | None = None,
+        rate_file: str | Path | None = None,
+        daily_limit: int = 100,
         fetch_json: Callable[[str, dict[str, str] | None], Any] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         _load_dotenv()
-        self.api_key = api_key or os.getenv("ALPACA_API_KEY")
-        self.api_secret = api_secret or os.getenv("ALPACA_API_SECRET")
+        self.api_key = api_key or os.getenv("EODHD_API_KEY")
+        data_dir = Path(os.getenv("WATCHTOWER_DATA_DIR", "data"))
+        self.rate_file = Path(rate_file) if rate_file else data_dir / "eodhd_requests.json"
+        self.daily_limit = daily_limit
         self._fetch_json = fetch_json or self._urlopen_json
         self._sleep = sleeper
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key and self.api_secret)
+        return bool(self.api_key)
 
     @property
     def unavailable_reason(self) -> str | None:
-        return None if self.available else "ALPACA_API_KEY or ALPACA_API_SECRET is not set"
+        return None if self.available else "EODHD_API_KEY is not set"
 
     def map_ticker(self, asset: str) -> str:
         normalized = asset.strip().upper().replace("/", "-").replace("_", "-")
-        return self.CRYPTO_TICKERS.get(normalized, normalized)
+        if normalized in self.TICKERS:
+            return self.TICKERS[normalized]
+        if "." in normalized:
+            return normalized
+        return f"{normalized}.US"
 
     def fetch(self, asset: str, limit: int = 50) -> list[NewsEvent]:
         return self.fetch_historical(asset, None, None, max_articles=limit)
@@ -362,71 +378,117 @@ class AlpacaNewsConnector:
             raise ValueError(self.unavailable_reason)
 
         events: list[NewsEvent] = []
-        page_token: str | None = None
+        offset = 0
         while len(events) < max_articles:
+            page_limit = max(1, min(50, max_articles - len(events)))
             params = {
-                "symbols": self.map_ticker(asset),
-                "limit": str(max(1, min(50, max_articles - len(events)))),
-                "sort": "desc",
+                "s": self.map_ticker(asset),
+                "api_token": self.api_key or "",
+                "limit": str(page_limit),
+                "offset": str(offset),
+                "fmt": "json",
             }
             if from_dt:
-                params["start"] = self._rfc3339(from_dt)
+                params["from"] = self._date_param(from_dt)
             if to_dt:
-                params["end"] = self._rfc3339(to_dt)
-            if page_token:
-                params["page_token"] = page_token
+                params["to"] = self._date_param(to_dt)
 
-            query = urllib.parse.urlencode(params)
-            payload = self._fetch_json(f"{self.BASE_URL}?{query}", self._headers())
-            if not isinstance(payload, dict):
-                raise ValueError("Alpaca news response must be a JSON object")
-            events.extend(self._map_events(asset, payload))
-            page_token = payload.get("next_page_token")
-            if not page_token or len(events) >= max_articles:
+            payload = self._request(params)
+            mapped = self._map_events(asset, payload)
+            events.extend(mapped)
+            if len(mapped) < page_limit or len(events) >= max_articles:
                 break
+            offset += page_limit
             self._sleep(1.0)
         return events[:max_articles]
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "APCA-API-KEY-ID": self.api_key or "",
-            "APCA-API-SECRET-KEY": self.api_secret or "",
-            "User-Agent": "watchtower/0.1",
-        }
+    def _request(self, params: dict[str, str]) -> Any:
+        self._check_and_increment_rate_limit()
+        query = urllib.parse.urlencode(params)
+        payload = self._fetch_json(f"{self.BASE_URL}?{query}", {"User-Agent": "watchtower/0.1"})
+        if isinstance(payload, dict):
+            message = str(payload.get("error") or payload.get("message") or payload.get("errors") or "")
+            if message:
+                raise ValueError(message)
+        if not isinstance(payload, (list, dict)):
+            raise ValueError("EODHD news response must be a JSON list or object")
+        return payload
 
-    def _map_events(self, asset: str, payload: dict[str, Any]) -> list[NewsEvent]:
-        articles = payload.get("news", [])
+    def _check_and_increment_rate_limit(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        state = {"date": today, "count": 0}
+        if self.rate_file.exists():
+            try:
+                loaded = json.loads(self.rate_file.read_text(encoding="utf-8"))
+                if loaded.get("date") == today:
+                    state = {"date": today, "count": int(loaded.get("count", 0))}
+            except (OSError, ValueError, TypeError):
+                state = {"date": today, "count": 0}
+
+        if state["count"] >= self.daily_limit:
+            raise RateLimitError(
+                f"EODHD daily request limit reached ({self.daily_limit}/day). "
+                f"Counter file: {self.rate_file}"
+            )
+
+        self.rate_file.parent.mkdir(parents=True, exist_ok=True)
+        state["count"] += 1
+        self.rate_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _map_events(self, asset: str, payload: Any) -> list[NewsEvent]:
+        articles: Any = payload
+        if isinstance(payload, dict):
+            articles = payload.get("data") or payload.get("news") or payload.get("items") or []
         if not isinstance(articles, list):
             return []
+
         events: list[NewsEvent] = []
+        ticker = self.map_ticker(asset)
         for item in articles:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("headline") or "Untitled Alpaca news")
-            url = str(item.get("url") or "")
-            published_at = _parse_iso_datetime(item.get("created_at"))
-            symbols = item.get("symbols") if isinstance(item.get("symbols"), list) else []
+            title = str(item.get("title") or "Untitled EODHD news")
+            url = str(item.get("link") or item.get("url") or "")
+            content = str(item.get("content") or item.get("summary") or "")
+            summary = content[:500] if len(content) > 500 else content
+            published_at = _parse_eodhd_datetime(str(item.get("date") or ""))
+            symbols = self._symbols(item.get("symbols"))
             events.append(
                 NewsEvent(
-                    id=_stable_event_id("alpaca", self.map_ticker(asset), url, published_at.isoformat(), title),
+                    id=_stable_event_id("eodhd", ticker, url, published_at.isoformat(), title),
                     asset=asset.upper(),
                     headline=title,
-                    summary=str(item.get("summary") or ""),
-                    source=str(item.get("source") or "Alpaca"),
+                    summary=summary,
+                    source=str(item.get("source") or "EODHD"),
                     url=url or None,
                     published_at=published_at,
                     sentiment=0.0,
                     novelty=0.5,
-                    relevance=0.8 if self.map_ticker(asset) in symbols else 0.5,
-                    tags=["alpaca", *[str(symbol) for symbol in symbols]],
-                    metadata={"connector": "alpaca-news", "symbols": symbols},
+                    relevance=0.8 if ticker in symbols else 0.5,
+                    tags=["eodhd", *symbols],
+                    metadata={"connector": "eodhd-news", "ticker": ticker, "symbols": symbols},
                 )
             )
         return events
 
-    def _rfc3339(self, value: datetime) -> str:
+    def _symbols(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            symbols = []
+            for item in value:
+                if isinstance(item, dict):
+                    symbol = item.get("code") or item.get("symbol") or item.get("ticker")
+                    if symbol:
+                        symbols.append(str(symbol).upper())
+                else:
+                    symbols.append(str(item).upper())
+            return symbols
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split(",") if item.strip()]
+        return []
+
+    def _date_param(self, value: datetime) -> str:
         moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return moment.astimezone(timezone.utc).date().isoformat()
 
     def _urlopen_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
         request = urllib.request.Request(url, headers=headers or {"User-Agent": "watchtower/0.1"})
@@ -440,7 +502,7 @@ class ConnectorRegistry:
         self.resolver = resolver or AssetResolver()
         self.crypto_market = CryptoMarketAdapter()
         self.alpha_vantage_news = AlphaVantageNewsConnector()
-        self.alpaca_news = AlpacaNewsConnector()
+        self.eodhd_news = EODHDNewsConnector()
 
     def list_connectors(self) -> list[dict]:
         return [
@@ -471,12 +533,12 @@ class ConnectorRegistry:
                 "description": "Alpha Vantage historical market news with sentiment scoring.",
             },
             {
-                "name": "alpaca-news",
+                "name": "eodhd-news",
                 "type": "news",
-                "requires": ["ALPACA_API_KEY", "ALPACA_API_SECRET"],
-                "available": self.alpaca_news.available,
-                "unavailable_reason": self.alpaca_news.unavailable_reason,
-                "description": "Alpaca historical market news with pagination.",
+                "requires": ["EODHD_API_KEY"],
+                "available": self.eodhd_news.available,
+                "unavailable_reason": self.eodhd_news.unavailable_reason,
+                "description": "EODHD historical financial news with offset pagination.",
             },
             {
                 "name": "mock-market",
@@ -518,8 +580,8 @@ class ConnectorRegistry:
             return self._rss_news(resolved_asset, feed_url, limit)
         if connector == "alphavantage-news":
             return self.alpha_vantage_news.fetch(resolved_asset, limit=limit, from_dt=from_dt, to_dt=to_dt)
-        if connector == "alpaca-news":
-            return self.alpaca_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
+        if connector == "eodhd-news":
+            return self.eodhd_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
         raise ValueError(f"Unknown news connector: {connector}")
 
     def fetch_historical_news(
@@ -536,8 +598,8 @@ class ConnectorRegistry:
             start = from_dt or (to_dt or utc_now()) - timedelta(days=7)
             end = to_dt or utc_now()
             return self.alpha_vantage_news.fetch_historical(resolved_asset, start, end, limit=limit)
-        if connector == "alpaca-news":
-            return self.alpaca_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
+        if connector == "eodhd-news":
+            return self.eodhd_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
         raise ValueError(f"Unknown historical news connector: {connector}")
 
     def fetch_market(self, connector: str, asset: str, exchange: str | None = None) -> MarketSnapshot:

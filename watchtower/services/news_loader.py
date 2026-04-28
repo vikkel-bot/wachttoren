@@ -11,7 +11,7 @@ class HistoricalNewsLoader:
     """
     Loads historical news for a backtest window.
 
-    Alpaca is used as the high-volume historical source. Alpha Vantage is used
+    EODHD is used as the high-volume historical source. Alpha Vantage is used
     as the sentiment source while the daily request budget allows it.
     """
 
@@ -35,19 +35,19 @@ class HistoricalNewsLoader:
         for asset in assets:
             loaded_for_asset = 0
             try:
-                alpaca_events = self.connectors.fetch_historical_news(
-                    connector="alpaca-news",
+                eodhd_events = self.connectors.fetch_historical_news(
+                    connector="eodhd-news",
                     asset=asset,
                     from_dt=from_dt,
                     to_dt=to_dt,
                     limit=500,
                 )
-                for event in alpaca_events:
+                for event in eodhd_events:
                     store.save_event(event)
-                loaded_for_asset += len(alpaca_events)
-                stats["articles_loaded"] += len(alpaca_events)
+                loaded_for_asset += len(eodhd_events)
+                stats["articles_loaded"] += len(eodhd_events)
             except ValueError as exc:
-                stats["errors"][asset] = f"alpaca-news: {exc}"
+                stats["errors"][asset] = f"eodhd-news: {exc}"
 
             try:
                 alpha_events = self.connectors.fetch_historical_news(

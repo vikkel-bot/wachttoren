@@ -179,7 +179,7 @@ def fetch_news(payload: ConnectorFetchIn) -> dict:
 @app.get("/news/historical")
 def fetch_historical_news(
     asset: str,
-    connector: str = "alpaca-news",
+    connector: str = "eodhd-news",
     from_dt: str | None = None,
     to_dt: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
