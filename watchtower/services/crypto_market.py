@@ -54,7 +54,9 @@ class CryptoMarketAdapter:
 
     def fetch_snapshot(self, asset: str, quote: str = "EUR") -> MarketSnapshot:
         market = self.market_code(asset, quote=quote)
-        ticker = self._request_json(f"{self.BITVAVO_BASE_URL}/{urllib.parse.quote(market)}/ticker/price")
+        ticker = self._request_json(
+            f"{self.BITVAVO_BASE_URL}/ticker/price?market={urllib.parse.quote(market)}"
+        )
         candles_raw = self._request_json(
             f"{self.BITVAVO_BASE_URL}/{urllib.parse.quote(market)}/candles?interval=1h&limit=30"
         )
@@ -116,10 +118,12 @@ class CryptoMarketAdapter:
     def _price_from_ticker(self, payload: Any) -> float | None:
         if isinstance(payload, dict):
             value = payload.get("price")
+        elif isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            value = payload[0].get("price")
         else:
             value = None
         try:
-            return float(value)
+            return float(str(value).replace(",", ""))
         except (TypeError, ValueError):
             return None
 

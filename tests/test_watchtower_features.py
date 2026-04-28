@@ -36,8 +36,8 @@ class ConnectorTests(unittest.TestCase):
 
     def test_bitvavo_public_connector_normalizes_crypto_snapshot(self) -> None:
         def fake_fetch(url: str):
-            if url.endswith("/ticker/price"):
-                return {"market": "BTC-EUR", "price": "106.0"}
+            if "/ticker/price?market=BTC-EUR" in url:
+                return [{"market": "BTC-EUR", "price": "106.0"}]
             return [
                 [1, "100", "101", "99", "100", "10"],
                 [2, "100", "104", "99", "103", "13"],
