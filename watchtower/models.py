@@ -96,6 +96,8 @@ class ConnectorFetchIn(BaseModel):
     exchange: str | None = None
     limit: int = Field(default=10, ge=1, le=50)
     feed_url: str | None = None
+    from_dt: datetime | None = None
+    to_dt: datetime | None = None
     ingest: bool = True
 
 

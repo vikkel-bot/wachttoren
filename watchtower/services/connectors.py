@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from watchtower.domain import MarketSnapshot, NewsEvent, utc_now
@@ -43,6 +50,10 @@ NEGATIVE_WORDS = {
 }
 
 
+class RateLimitError(ValueError):
+    """Raised when a connector-side request budget is exhausted."""
+
+
 def naive_sentiment(text: str) -> float:
     words = set(re.findall(r"[a-z]+", text.lower()))
     positive = len(words & POSITIVE_WORDS)
@@ -64,10 +75,372 @@ def parse_datetime(value: str | None) -> datetime:
         return utc_now()
 
 
+def _load_dotenv() -> None:
+    for path in (Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"):
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def _stable_event_id(prefix: str, *parts: str) -> str:
+    raw = "|".join(part or "" for part in parts)
+    return f"{prefix}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _clamp(value: float, minimum: float = -1.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_alpha_datetime(value: str | None) -> datetime:
+    if not value:
+        return utc_now()
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return utc_now()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime:
+    if not value:
+        return utc_now()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return utc_now()
+
+
+def _alpha_time_param(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
+
+
+class AlphaVantageNewsConnector:
+    """News + sentiment via Alpha Vantage NEWS_SENTIMENT."""
+
+    BASE_URL = "https://www.alphavantage.co/query"
+    CRYPTO_TICKERS = {
+        "BTC-EUR": "CRYPTO:BTC",
+        "BTC": "CRYPTO:BTC",
+        "ETH-EUR": "CRYPTO:ETH",
+        "ETH-BTC": "CRYPTO:ETH",
+        "ETH": "CRYPTO:ETH",
+        "SOL-EUR": "CRYPTO:SOL",
+        "SOL": "CRYPTO:SOL",
+    }
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        rate_file: str | Path | None = None,
+        daily_limit: int = 25,
+        fetch_json: Callable[[str, dict[str, str] | None], Any] | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        _load_dotenv()
+        self.api_key = api_key or os.getenv("ALPHAVANTAGE_API_KEY")
+        data_dir = Path(os.getenv("WATCHTOWER_DATA_DIR", "data"))
+        self.rate_file = Path(rate_file) if rate_file else data_dir / "alphavantage_requests.json"
+        self.daily_limit = daily_limit
+        self._fetch_json = fetch_json or self._urlopen_json
+        self._sleep = sleeper
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return None if self.available else "ALPHAVANTAGE_API_KEY is not set"
+
+    def map_ticker(self, asset: str) -> str:
+        normalized = asset.strip().upper().replace("/", "-").replace("_", "-")
+        return self.CRYPTO_TICKERS.get(normalized, normalized)
+
+    def fetch(
+        self,
+        asset: str,
+        limit: int = 50,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+    ) -> list[NewsEvent]:
+        if not self.available:
+            raise ValueError(self.unavailable_reason)
+
+        params = {
+            "function": "NEWS_SENTIMENT",
+            "tickers": self.map_ticker(asset),
+            "apikey": self.api_key or "",
+            "limit": str(max(1, min(limit, 1000))),
+        }
+        if from_dt:
+            params["time_from"] = _alpha_time_param(from_dt) or ""
+        if to_dt:
+            params["time_to"] = _alpha_time_param(to_dt) or ""
+        if from_dt or to_dt:
+            params["sort"] = "EARLIEST"
+
+        payload = self._request(params)
+        return self._map_events(asset, payload)
+
+    def fetch_historical(
+        self,
+        asset: str,
+        from_dt: datetime,
+        to_dt: datetime,
+        limit: int = 200,
+    ) -> list[NewsEvent]:
+        events: list[NewsEvent] = []
+        cursor = from_dt
+        while cursor < to_dt and len(events) < limit:
+            end = min(cursor + timedelta(days=7), to_dt)
+            remaining = limit - len(events)
+            events.extend(self.fetch(asset, limit=remaining, from_dt=cursor, to_dt=end))
+            cursor = end
+            if cursor < to_dt and len(events) < limit:
+                self._sleep(2.0)
+        return events[:limit]
+
+    def _request(self, params: dict[str, str]) -> dict[str, Any]:
+        self._check_and_increment_rate_limit()
+        query = urllib.parse.urlencode(params)
+        payload = self._fetch_json(f"{self.BASE_URL}?{query}", None)
+        if not isinstance(payload, dict):
+            raise ValueError("Alpha Vantage response must be a JSON object")
+        note = str(payload.get("Note") or payload.get("Information") or "")
+        if "rate limit" in note.lower() or "standard api rate limit" in note.lower():
+            raise RateLimitError(note)
+        if payload.get("Error Message"):
+            raise ValueError(str(payload["Error Message"]))
+        return payload
+
+    def _check_and_increment_rate_limit(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        state = {"date": today, "count": 0}
+        if self.rate_file.exists():
+            try:
+                loaded = json.loads(self.rate_file.read_text(encoding="utf-8"))
+                if loaded.get("date") == today:
+                    state = {"date": today, "count": int(loaded.get("count", 0))}
+            except (OSError, ValueError, TypeError):
+                state = {"date": today, "count": 0}
+
+        if state["count"] >= self.daily_limit:
+            raise RateLimitError(
+                f"Alpha Vantage daily request limit reached ({self.daily_limit}/day). "
+                f"Counter file: {self.rate_file}"
+            )
+
+        self.rate_file.parent.mkdir(parents=True, exist_ok=True)
+        state["count"] += 1
+        self.rate_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _map_events(self, asset: str, payload: dict[str, Any]) -> list[NewsEvent]:
+        feed = payload.get("feed", [])
+        if not isinstance(feed, list):
+            return []
+
+        events: list[NewsEvent] = []
+        mapped_ticker = self.map_ticker(asset)
+        for item in feed:
+            if not isinstance(item, dict):
+                continue
+            ticker_sentiment = self._ticker_sentiment(item.get("ticker_sentiment"), mapped_ticker)
+            sentiment = _clamp(_safe_float(item.get("overall_sentiment_score"), 0.0))
+            relevance = _clamp(_safe_float(ticker_sentiment.get("relevance_score"), 0.5), 0.0, 1.0)
+            ticker_score = _clamp(_safe_float(ticker_sentiment.get("ticker_sentiment_score"), sentiment))
+            label = str(item.get("overall_sentiment_label") or "Neutral")
+            title = str(item.get("title") or "Untitled Alpha Vantage news")
+            url = str(item.get("url") or "")
+            published_at = _parse_alpha_datetime(item.get("time_published"))
+            events.append(
+                NewsEvent(
+                    id=_stable_event_id("av", mapped_ticker, url, published_at.isoformat(), title),
+                    asset=asset.upper(),
+                    headline=title,
+                    summary=str(item.get("summary") or ""),
+                    source=str(item.get("source") or "Alpha Vantage"),
+                    url=url or None,
+                    published_at=published_at,
+                    sentiment=sentiment,
+                    novelty=0.55,
+                    relevance=relevance,
+                    tags=["alpha_vantage", "sentiment", label],
+                    metadata={
+                        "connector": "alphavantage-news",
+                        "overall_sentiment_label": label,
+                        "ticker_sentiment_score": ticker_score,
+                        "ticker": mapped_ticker,
+                    },
+                )
+            )
+        return events
+
+    def _ticker_sentiment(self, values: Any, mapped_ticker: str) -> dict[str, Any]:
+        if not isinstance(values, list):
+            return {}
+        for item in values:
+            if isinstance(item, dict) and item.get("ticker") == mapped_ticker:
+                return item
+        return values[0] if values and isinstance(values[0], dict) else {}
+
+    def _urlopen_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        request = urllib.request.Request(url, headers=headers or {"User-Agent": "watchtower/0.1"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+class AlpacaNewsConnector:
+    """Historical news via Alpaca Markets News API."""
+
+    BASE_URL = "https://data.alpaca.markets/v1beta1/news"
+    CRYPTO_TICKERS = {
+        "BTC-EUR": "BTC/USD",
+        "BTC": "BTC/USD",
+        "ETH-EUR": "ETH/USD",
+        "ETH-BTC": "ETH/USD",
+        "ETH": "ETH/USD",
+        "SOL-EUR": "SOL/USD",
+        "SOL": "SOL/USD",
+    }
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        fetch_json: Callable[[str, dict[str, str] | None], Any] | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        _load_dotenv()
+        self.api_key = api_key or os.getenv("ALPACA_API_KEY")
+        self.api_secret = api_secret or os.getenv("ALPACA_API_SECRET")
+        self._fetch_json = fetch_json or self._urlopen_json
+        self._sleep = sleeper
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key and self.api_secret)
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return None if self.available else "ALPACA_API_KEY or ALPACA_API_SECRET is not set"
+
+    def map_ticker(self, asset: str) -> str:
+        normalized = asset.strip().upper().replace("/", "-").replace("_", "-")
+        return self.CRYPTO_TICKERS.get(normalized, normalized)
+
+    def fetch(self, asset: str, limit: int = 50) -> list[NewsEvent]:
+        return self.fetch_historical(asset, None, None, max_articles=limit)
+
+    def fetch_historical(
+        self,
+        asset: str,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        max_articles: int = 500,
+    ) -> list[NewsEvent]:
+        if not self.available:
+            raise ValueError(self.unavailable_reason)
+
+        events: list[NewsEvent] = []
+        page_token: str | None = None
+        while len(events) < max_articles:
+            params = {
+                "symbols": self.map_ticker(asset),
+                "limit": str(max(1, min(50, max_articles - len(events)))),
+                "sort": "desc",
+            }
+            if from_dt:
+                params["start"] = self._rfc3339(from_dt)
+            if to_dt:
+                params["end"] = self._rfc3339(to_dt)
+            if page_token:
+                params["page_token"] = page_token
+
+            query = urllib.parse.urlencode(params)
+            payload = self._fetch_json(f"{self.BASE_URL}?{query}", self._headers())
+            if not isinstance(payload, dict):
+                raise ValueError("Alpaca news response must be a JSON object")
+            events.extend(self._map_events(asset, payload))
+            page_token = payload.get("next_page_token")
+            if not page_token or len(events) >= max_articles:
+                break
+            self._sleep(1.0)
+        return events[:max_articles]
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "APCA-API-KEY-ID": self.api_key or "",
+            "APCA-API-SECRET-KEY": self.api_secret or "",
+            "User-Agent": "watchtower/0.1",
+        }
+
+    def _map_events(self, asset: str, payload: dict[str, Any]) -> list[NewsEvent]:
+        articles = payload.get("news", [])
+        if not isinstance(articles, list):
+            return []
+        events: list[NewsEvent] = []
+        for item in articles:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("headline") or "Untitled Alpaca news")
+            url = str(item.get("url") or "")
+            published_at = _parse_iso_datetime(item.get("created_at"))
+            symbols = item.get("symbols") if isinstance(item.get("symbols"), list) else []
+            events.append(
+                NewsEvent(
+                    id=_stable_event_id("alpaca", self.map_ticker(asset), url, published_at.isoformat(), title),
+                    asset=asset.upper(),
+                    headline=title,
+                    summary=str(item.get("summary") or ""),
+                    source=str(item.get("source") or "Alpaca"),
+                    url=url or None,
+                    published_at=published_at,
+                    sentiment=0.0,
+                    novelty=0.5,
+                    relevance=0.8 if self.map_ticker(asset) in symbols else 0.5,
+                    tags=["alpaca", *[str(symbol) for symbol in symbols]],
+                    metadata={"connector": "alpaca-news", "symbols": symbols},
+                )
+            )
+        return events
+
+    def _rfc3339(self, value: datetime) -> str:
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _urlopen_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        request = urllib.request.Request(url, headers=headers or {"User-Agent": "watchtower/0.1"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
 class ConnectorRegistry:
     def __init__(self, resolver: AssetResolver | None = None) -> None:
+        _load_dotenv()
         self.resolver = resolver or AssetResolver()
         self.crypto_market = CryptoMarketAdapter()
+        self.alpha_vantage_news = AlphaVantageNewsConnector()
+        self.alpaca_news = AlpacaNewsConnector()
 
     def list_connectors(self) -> list[dict]:
         return [
@@ -88,6 +461,22 @@ class ConnectorRegistry:
                 "type": "news",
                 "requires": ["feed_url"],
                 "description": "Fetches public RSS/Atom-like feeds through urllib.",
+            },
+            {
+                "name": "alphavantage-news",
+                "type": "news",
+                "requires": ["ALPHAVANTAGE_API_KEY"],
+                "available": self.alpha_vantage_news.available,
+                "unavailable_reason": self.alpha_vantage_news.unavailable_reason,
+                "description": "Alpha Vantage historical market news with sentiment scoring.",
+            },
+            {
+                "name": "alpaca-news",
+                "type": "news",
+                "requires": ["ALPACA_API_KEY", "ALPACA_API_SECRET"],
+                "available": self.alpaca_news.available,
+                "unavailable_reason": self.alpaca_news.unavailable_reason,
+                "description": "Alpaca historical market news with pagination.",
             },
             {
                 "name": "mock-market",
@@ -116,6 +505,8 @@ class ConnectorRegistry:
         limit: int = 10,
         feed_url: str | None = None,
         exchange: str | None = None,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
     ) -> list[NewsEvent]:
         connector = connector.lower()
         resolved_asset = self.resolver.resolve(asset)
@@ -125,7 +516,29 @@ class ConnectorRegistry:
             if not feed_url:
                 raise ValueError("feed_url is required for rss connector")
             return self._rss_news(resolved_asset, feed_url, limit)
+        if connector == "alphavantage-news":
+            return self.alpha_vantage_news.fetch(resolved_asset, limit=limit, from_dt=from_dt, to_dt=to_dt)
+        if connector == "alpaca-news":
+            return self.alpaca_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
         raise ValueError(f"Unknown news connector: {connector}")
+
+    def fetch_historical_news(
+        self,
+        connector: str,
+        asset: str,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        limit: int = 200,
+    ) -> list[NewsEvent]:
+        connector = connector.lower()
+        resolved_asset = self.resolver.resolve(asset)
+        if connector == "alphavantage-news":
+            start = from_dt or (to_dt or utc_now()) - timedelta(days=7)
+            end = to_dt or utc_now()
+            return self.alpha_vantage_news.fetch_historical(resolved_asset, start, end, limit=limit)
+        if connector == "alpaca-news":
+            return self.alpaca_news.fetch_historical(resolved_asset, from_dt, to_dt, max_articles=limit)
+        raise ValueError(f"Unknown historical news connector: {connector}")
 
     def fetch_market(self, connector: str, asset: str, exchange: str | None = None) -> MarketSnapshot:
         connector = connector.lower()

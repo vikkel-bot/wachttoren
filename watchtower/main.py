@@ -29,11 +29,12 @@ from watchtower.models import (
 )
 from watchtower.services.assets import ListedAssetUniverse
 from watchtower.services.colony import DEFAULT_COLONY_CONFIG, ColonyBridge
-from watchtower.services.connectors import ConnectorRegistry
+from watchtower.services.connectors import ConnectorRegistry, RateLimitError
 from watchtower.services.exchanges import ExchangeUniverse, TradingSessionDetector
 from watchtower.services.intermarket import IntermarketEngine
 from watchtower.services.market_context import MarketContextEngine
 from watchtower.services.news_radar import NewsRadar
+from watchtower.services.news_loader import HistoricalNewsLoader
 from watchtower.services.outcomes import OutcomeTracker
 from watchtower.services.providers import ProviderRegistry
 from watchtower.services.regional_scoring import RegionalEntryScorer
@@ -54,6 +55,7 @@ resolver = AssetResolver()
 scorer = EntryScorer()
 outcomes = OutcomeTracker()
 connectors = ConnectorRegistry(resolver)
+historical_news_loader = HistoricalNewsLoader(connectors)
 market_context = MarketContextEngine()
 colony_bridge = ColonyBridge()
 exchange_universe = ExchangeUniverse()
@@ -160,7 +162,11 @@ def fetch_news(payload: ConnectorFetchIn) -> dict:
             limit=payload.limit,
             feed_url=payload.feed_url,
             exchange=payload.exchange,
+            from_dt=payload.from_dt,
+            to_dt=payload.to_dt,
         )
+    except RateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -168,6 +174,65 @@ def fetch_news(payload: ConnectorFetchIn) -> dict:
     for event in events:
         event_payloads.append(store.save_event(event) if payload.ingest else to_jsonable(event))
     return {"connector": payload.connector, "count": len(event_payloads), "events": event_payloads}
+
+
+@app.get("/news/historical")
+def fetch_historical_news(
+    asset: str,
+    connector: str = "alpaca-news",
+    from_dt: str | None = None,
+    to_dt: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+    ingest: bool = True,
+) -> dict:
+    try:
+        events = connectors.fetch_historical_news(
+            connector=connector,
+            asset=asset,
+            from_dt=_parse_datetime(from_dt),
+            to_dt=_parse_datetime(to_dt),
+            limit=limit,
+        )
+    except RateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    event_payloads = [store.save_event(event) if ingest else to_jsonable(event) for event in events]
+    return {"connector": connector, "asset": resolver.resolve(asset), "count": len(event_payloads), "events": event_payloads}
+
+
+@app.get("/news/sentiment")
+def fetch_sentiment_news(
+    asset: str,
+    from_dt: str | None = None,
+    to_dt: str | None = None,
+    limit: int = Query(default=50, ge=1, le=1000),
+    ingest: bool = True,
+) -> dict:
+    connector = "alphavantage-news"
+    try:
+        events = connectors.fetch_historical_news(
+            connector=connector,
+            asset=asset,
+            from_dt=_parse_datetime(from_dt),
+            to_dt=_parse_datetime(to_dt),
+            limit=limit,
+        )
+    except RateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    event_payloads = [store.save_event(event) if ingest else to_jsonable(event) for event in events]
+    avg_sentiment = sum(float(event.sentiment) for event in events) / len(events) if events else 0.0
+    return {
+        "connector": connector,
+        "asset": resolver.resolve(asset),
+        "count": len(event_payloads),
+        "avg_sentiment": round(avg_sentiment, 4),
+        "events": event_payloads,
+    }
 
 
 @app.get("/news-radar/config")
@@ -1256,7 +1321,8 @@ def _best_entry_row(entry: dict) -> str:
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _resolve_exchange(value: str | None) -> str | None:

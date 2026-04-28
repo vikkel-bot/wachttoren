@@ -5,7 +5,7 @@ Watchtower is een losse entry-intelligence service. Hij verzamelt events en mark
 ## Wat zit erin
 
 - FastAPI service met health, event, market, signal en outcome endpoints
-- Connectorlaag voor mock news, publieke RSS-feeds, mock market snapshots en public Bitvavo crypto market-data
+- Connectorlaag voor mock news, publieke RSS-feeds, Alpha Vantage/Alpaca nieuws, mock market snapshots en public Bitvavo crypto market-data
 - News Radar voor GDELT/RSS/officiele headlines binnen een EUR25-maandbudget
 - Exchange Universe voor AEX, Nasdaq, grote Aziatische beurzen en Afrikaanse beurzen
 - Regionale watchlist met thresholds per exchange + asset
@@ -23,6 +23,7 @@ Watchtower is een losse entry-intelligence service. Hij verzamelt events en mark
 - Pipeline-run endpoint om watched assets automatisch te evalueren
 - Dashboard met equity entries, commodity entries, crypto entries en globale marktkleur
 - `/backtest/signals` export voor Colony v2 replay/backtests
+- `/news/historical` en `/news/sentiment` endpoints voor historische nieuwsdata en sentiment
 - Mock/demo flow zonder echte news API of broker
 
 ## Installeren
@@ -138,6 +139,28 @@ $body = @{
 } | ConvertTo-Json
 
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/connectors/market/fetch -Body $body -ContentType "application/json"
+```
+
+Voor historische news/sentiment providers zet je lokaal in `.env`:
+
+```text
+ALPHAVANTAGE_API_KEY=<jouw-key>
+ALPACA_API_KEY=<jouw-key>
+ALPACA_API_SECRET=<jouw-secret>
+```
+
+`.env` wordt niet gecommit. Gebruik `.env.example` als template. Alpha Vantage heeft in de gratis tier een kleine daglimiet; Watchtower houdt daarom lokaal een teller bij in `data/alphavantage_requests.json`.
+
+Historisch Alpaca nieuws ophalen en opslaan:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/news/historical?asset=AAPL&connector=alpaca-news&from_dt=2026-04-01T00:00:00Z&to_dt=2026-04-28T00:00:00Z&limit=200"
+```
+
+Alpha Vantage nieuws met sentiment ophalen en opslaan:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/news/sentiment?asset=BTC-EUR&from_dt=2026-04-01T00:00:00Z&to_dt=2026-04-28T00:00:00Z&limit=50"
 ```
 
 ### 1b. News Radar onder EUR25 per maand
@@ -283,6 +306,8 @@ Geimplementeerd voor deze MVP:
 
 - `mock-news`
 - `mock-regional-news`
+- `alphavantage-news`
+- `alpaca-news`
 - `mock-market`
 - `mock-regional-market`
 - `bitvavo-public`
