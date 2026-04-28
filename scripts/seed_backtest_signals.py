@@ -118,8 +118,10 @@ def seed_asset(
             asset_info,
         )
         signal = _as_historical_signal(signal, enriched_event)
-        if signal.get("direction") == "neutral":
+        if not signal.get("direction"):
             continue
+        # neutral signalen worden WEL opgeslagen in seed context
+        # backtest beslist zelf of het iets mee doet
         normalized = _backtest_signal_payload(signal)
         generated.append(normalized)
         entry_scores.append(float(normalized.get("entry_score") or 0.0))
@@ -199,6 +201,7 @@ def _as_historical_signal(signal: dict[str, Any], event: NewsEvent) -> dict[str,
     signal["created_at"] = timestamp.isoformat()
     signal["expires_at"] = (timestamp + _expiry_delta(signal.get("time_window"))).isoformat()
     signal["seed_source"] = "watchtower_historical_news_seed"
+    signal["sentiment_quality"] = "av_backfilled" if event.metadata.get("seed_sentiment_source") else "eodhd_default"
     return signal
 
 
