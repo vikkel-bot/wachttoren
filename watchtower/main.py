@@ -386,6 +386,7 @@ def run_pipeline(payload: PipelineRunIn) -> dict:
 
     watchlist = store.list_watchlist(enabled_only=True, exchange=payload.exchange, region=payload.region)[: payload.max_assets]
     signals = []
+    errors = []
     evaluated_assets = 0
     for item in watchlist:
         exchange = exchange_universe.get(item["exchange"])
@@ -407,7 +408,8 @@ def run_pipeline(payload: PipelineRunIn) -> dict:
                 exchange=exchange.code,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            errors.append({"exchange": exchange.code, "asset": item["asset"], "detail": str(exc)})
+            continue
 
         if payload.persist:
             store.save_market_snapshot(market)
@@ -422,6 +424,8 @@ def run_pipeline(payload: PipelineRunIn) -> dict:
     return {
         "evaluated_assets": evaluated_assets,
         "signals_created": len(signals),
+        "failed_assets": len(errors),
+        "errors": errors,
         "signals": signals,
     }
 
@@ -449,6 +453,7 @@ def run_global_pipeline(payload: GlobalPipelineRunIn) -> dict:
         grouped_assets.setdefault(exchange.code, []).append(listed_asset)
 
     signals = []
+    errors = []
     evaluated_assets = 0
     for exchange_code, listed_assets in sorted(grouped_assets.items()):
         exchange = exchange_universe.require(exchange_code)
@@ -481,7 +486,8 @@ def run_global_pipeline(payload: GlobalPipelineRunIn) -> dict:
                     exchange=exchange.code,
                 )
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                errors.append({"exchange": exchange.code, "asset": listed_asset["symbol"], "detail": str(exc)})
+                continue
 
             if payload.persist:
                 store.save_market_snapshot(market)
@@ -496,6 +502,8 @@ def run_global_pipeline(payload: GlobalPipelineRunIn) -> dict:
     return {
         "evaluated_assets": evaluated_assets,
         "signals_created": len(signals),
+        "failed_assets": len(errors),
+        "errors": errors,
         "signals": signals,
     }
 

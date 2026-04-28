@@ -43,6 +43,9 @@ class CryptoMarketAdapter:
         "SOL-EUR": "SOL-EUR",
         "ETH-BTC": "ETH-BTC",
     }
+    SYNTHETIC_MARKETS = {
+        "ETH-BTC": ("ETH-EUR", "BTC-EUR"),
+    }
 
     def __init__(
         self,
@@ -54,6 +57,9 @@ class CryptoMarketAdapter:
 
     def fetch_snapshot(self, asset: str, quote: str = "EUR") -> MarketSnapshot:
         market = self.market_code(asset, quote=quote)
+        if market in self.SYNTHETIC_MARKETS:
+            return self._fetch_synthetic_ratio(market)
+
         ticker = self._request_json(
             f"{self.BITVAVO_BASE_URL}/ticker/price?market={urllib.parse.quote(market)}"
         )
@@ -67,6 +73,33 @@ class CryptoMarketAdapter:
             raise CryptoMarketDataError(f"Missing usable price for {market}")
 
         return self._snapshot_from_candles(market, price, candles)
+
+    def _fetch_synthetic_ratio(self, market: str) -> MarketSnapshot:
+        base_market, quote_market = self.SYNTHETIC_MARKETS[market]
+        base_ticker = self._request_json(
+            f"{self.BITVAVO_BASE_URL}/ticker/price?market={urllib.parse.quote(base_market)}"
+        )
+        quote_ticker = self._request_json(
+            f"{self.BITVAVO_BASE_URL}/ticker/price?market={urllib.parse.quote(quote_market)}"
+        )
+        base_candles = self._parse_candles(
+            self._request_json(f"{self.BITVAVO_BASE_URL}/{urllib.parse.quote(base_market)}/candles?interval=1h&limit=30")
+        )
+        quote_candles = self._parse_candles(
+            self._request_json(f"{self.BITVAVO_BASE_URL}/{urllib.parse.quote(quote_market)}/candles?interval=1h&limit=30")
+        )
+
+        base_price = self._price_from_ticker(base_ticker)
+        quote_price = self._price_from_ticker(quote_ticker)
+        ratio_candles = self._ratio_candles(base_candles, quote_candles)
+        if base_price and quote_price and quote_price > 0:
+            price = base_price / quote_price
+        elif ratio_candles:
+            price = ratio_candles[-1].close
+        else:
+            raise CryptoMarketDataError(f"Missing usable synthetic ratio data for {market}")
+
+        return self._snapshot_from_candles(market, price, ratio_candles)
 
     def market_code(self, asset: str, quote: str = "EUR") -> str:
         normalized = asset.strip().upper().replace("/", "-").replace("_", "-")
@@ -126,6 +159,27 @@ class CryptoMarketAdapter:
             return float(str(value).replace(",", ""))
         except (TypeError, ValueError):
             return None
+
+    def _ratio_candles(self, base_candles: list[Candle], quote_candles: list[Candle]) -> list[Candle]:
+        base_by_ts = {candle.timestamp: candle for candle in base_candles}
+        quote_by_ts = {candle.timestamp: candle for candle in quote_candles}
+        candles: list[Candle] = []
+        for timestamp in sorted(base_by_ts.keys() & quote_by_ts.keys()):
+            base = base_by_ts[timestamp]
+            quote = quote_by_ts[timestamp]
+            if min(quote.open, quote.high, quote.low, quote.close) <= 0:
+                continue
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    open=base.open / quote.open,
+                    high=base.high / quote.low,
+                    low=base.low / quote.high,
+                    close=base.close / quote.close,
+                    volume=base.volume,
+                )
+            )
+        return candles
 
     def _snapshot_from_candles(self, market: str, price: float, candles: list[Candle]) -> MarketSnapshot:
         if len(candles) < 2:

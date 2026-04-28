@@ -54,6 +54,33 @@ class ConnectorTests(unittest.TestCase):
         self.assertGreater(snapshot.change_1h_pct, 0)
         self.assertGreater(snapshot.volume_zscore, 0)
 
+    def test_bitvavo_public_connector_builds_synthetic_eth_btc_ratio(self) -> None:
+        def fake_fetch(url: str):
+            if "/ticker/price?market=ETH-EUR" in url:
+                return {"market": "ETH-EUR", "price": "2000.0"}
+            if "/ticker/price?market=BTC-EUR" in url:
+                return {"market": "BTC-EUR", "price": "50000.0"}
+            if "/ETH-EUR/candles" in url:
+                return [
+                    [1, "1900", "1950", "1880", "1920", "10"],
+                    [2, "1920", "2020", "1910", "2000", "12"],
+                ]
+            if "/BTC-EUR/candles" in url:
+                return [
+                    [1, "48000", "49000", "47000", "48500", "20"],
+                    [2, "48500", "50500", "48000", "50000", "22"],
+                ]
+            raise AssertionError(f"Unexpected url: {url}")
+
+        registry = ConnectorRegistry()
+        registry.crypto_market = CryptoMarketAdapter(fetch_json=fake_fetch)
+
+        snapshot = registry.fetch_market("bitvavo-public", "ETH-BTC", exchange="BITVAVO")
+
+        self.assertEqual(snapshot.asset, "ETH-BTC")
+        self.assertAlmostEqual(snapshot.price, 0.04)
+        self.assertGreater(snapshot.change_1h_pct, 0)
+
 
 class WatchlistStorageTests(unittest.TestCase):
     def test_watchlist_roundtrip(self) -> None:
