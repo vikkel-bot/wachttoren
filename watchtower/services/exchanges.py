@@ -124,6 +124,9 @@ class TradingSessionDetector:
         local_dt = moment.astimezone(tz)
         local_date = local_dt.date()
 
+        if exchange.market_type == "crypto":
+            return self._status_payload(exchange, local_dt, True, True, True, "continuous", "crypto_24_7", None, None)
+
         closed_reason = self._closed_reason(exchange, local_date)
         if closed_reason:
             next_open = self._next_open(exchange, local_dt)
@@ -149,6 +152,8 @@ class TradingSessionDetector:
         return self._status_payload(exchange, local_dt, False, False, False, "closed", "outside_session_hours", next_open, None)
 
     def _closed_reason(self, exchange: Exchange, local_date: date) -> str | None:
+        if exchange.market_type == "crypto":
+            return None
         if local_date.weekday() >= 5:
             return "weekend"
         if local_date.isoformat() in exchange.holiday_dates:
@@ -227,6 +232,21 @@ def _seed_exchanges() -> list[Exchange]:
             ticker_suffix=".AS",
             sessions=[block("regular", "09:00", "17:30", True, True, True)],
             source_url="https://www.euronext.com/en/trading-calendars-hours",
+        ),
+        Exchange(
+            code="BITVAVO",
+            name="Bitvavo",
+            mic="BITVAVO",
+            country="Netherlands",
+            region="Crypto",
+            timezone="Europe/Amsterdam",
+            currency="EUR",
+            main_index="BTC-EUR",
+            languages=["nl", "en"],
+            sessions=[block("continuous", "00:00", "23:59", True, True, True)],
+            source_url="https://api.bitvavo.com/v2",
+            notes="Crypto venue seeded as continuous 24/7 market data; execution remains outside Watchtower.",
+            market_type="crypto",
         ),
         Exchange(
             code="NASDAQ",

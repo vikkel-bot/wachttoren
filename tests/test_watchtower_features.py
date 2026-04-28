@@ -10,6 +10,7 @@ from watchtower.domain import EntrySignal, MarketSnapshot, OutcomeEvaluation
 from watchtower.services.assets import ListedAssetUniverse
 from watchtower.services.colony import ColonyBridge
 from watchtower.services.connectors import ConnectorRegistry
+from watchtower.services.crypto_market import CryptoMarketAdapter
 from watchtower.services.exchanges import ExchangeUniverse, TradingSessionDetector
 from watchtower.services.intermarket import IntermarketEngine
 from watchtower.services.market_context import MarketContextEngine
@@ -32,6 +33,26 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(snapshot.asset, "AAPL")
         self.assertGreaterEqual(snapshot.volume_zscore, 2.0)
+
+    def test_bitvavo_public_connector_normalizes_crypto_snapshot(self) -> None:
+        def fake_fetch(url: str):
+            if url.endswith("/ticker/price"):
+                return {"market": "BTC-EUR", "price": "106.0"}
+            return [
+                [1, "100", "101", "99", "100", "10"],
+                [2, "100", "104", "99", "103", "13"],
+                [3, "103", "107", "102", "106", "20"],
+            ]
+
+        registry = ConnectorRegistry()
+        registry.crypto_market = CryptoMarketAdapter(fetch_json=fake_fetch)
+
+        snapshot = registry.fetch_market("bitvavo-public", "BTC", exchange="BITVAVO")
+
+        self.assertEqual(snapshot.asset, "BTC-EUR")
+        self.assertEqual(snapshot.price, 106.0)
+        self.assertGreater(snapshot.change_1h_pct, 0)
+        self.assertGreater(snapshot.volume_zscore, 0)
 
 
 class WatchlistStorageTests(unittest.TestCase):
@@ -82,6 +103,7 @@ class WatchlistStorageTests(unittest.TestCase):
                 "created_at": "2026-04-26T10:00:00+00:00",
             }
             store.save_signal(signal)
+            store.save_signal({**signal, "id": "sig_2", "asset": "BTC-EUR", "asset_class": "crypto", "created_at": "2026-04-27T10:00:00+00:00"})
             store.save_outcome(
                 OutcomeEvaluation(
                     signal_id="sig_1",
@@ -99,6 +121,10 @@ class WatchlistStorageTests(unittest.TestCase):
             self.assertEqual(summary["hit_rate"], 1.0)
             self.assertEqual(summary["by_asset"]["AAPL"]["avg_return_pct"], 1.0)
             self.assertEqual(summary["by_exchange"]["NASDAQ"]["hit_rate"], 1.0)
+
+            exported = store.export_signals(asset_class="crypto", from_ts="2026-04-27T00:00:00+00:00")
+            self.assertEqual(len(exported), 1)
+            self.assertEqual(exported[0]["asset"], "BTC-EUR")
         finally:
             db_path.unlink(missing_ok=True)
 
@@ -114,6 +140,17 @@ class ExchangeUniverseTests(unittest.TestCase):
         self.assertIn("HKEX", codes)
         self.assertIn("JSE", codes)
         self.assertIn("COMEX", codes)
+        self.assertIn("BITVAVO", codes)
+
+    def test_crypto_exchange_is_continuous_on_weekend(self) -> None:
+        universe = ExchangeUniverse()
+        detector = TradingSessionDetector(universe)
+        moment = datetime(2026, 4, 26, 10, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+
+        status = detector.status("BITVAVO", moment)
+
+        self.assertTrue(status["is_trading"])
+        self.assertEqual(status["session"], "continuous")
 
     def test_exchange_session_detects_regular_trading(self) -> None:
         universe = ExchangeUniverse()
@@ -151,9 +188,11 @@ class ExchangeUniverseTests(unittest.TestCase):
 
         equities = assets.list(asset_class="equity")
         commodities = assets.list(asset_class="commodity")
+        crypto = assets.list(asset_class="crypto")
 
         self.assertTrue(any(item["key"] == "NASDAQ:AAPL" for item in equities))
         self.assertTrue(any(item["key"] == "COMEX:GOLD" for item in commodities))
+        self.assertTrue(any(item["key"] == "BITVAVO:BTC-EUR" for item in crypto))
 
 
 class RegionalScoringTests(unittest.TestCase):
@@ -184,6 +223,22 @@ class RegionalScoringTests(unittest.TestCase):
         self.assertIn("industrial_growth", context["drivers"])
         self.assertIn("AEX:ASML", context["linked_assets"])
         self.assertIn("data_centers", context["drivers"])
+
+    def test_intermarket_engine_links_crypto_cross_fields(self) -> None:
+        universe = ExchangeUniverse()
+        market = MarketSnapshot(asset="BTC-EUR", price=60000, volume_zscore=2.0, trend_1d=0.4)
+
+        context = IntermarketEngine().context(
+            {"symbol": "BTC-EUR", "asset_class": "crypto", "sector": "Crypto"},
+            universe.require("BITVAVO"),
+            market,
+        )
+
+        self.assertEqual(context["asset_class"], "crypto")
+        self.assertIn("btc_vs_qqq_risk_beta", context["drivers"])
+        self.assertIn("btc_vs_dxy_usd_liquidity", context["drivers"])
+        self.assertIn("NASDAQ:QQQ", context["linked_assets"])
+        self.assertIn("FX:DXY", context["linked_assets"])
 
     def test_intermarket_dashboard_links_include_effects(self) -> None:
         links = IntermarketEngine().dashboard_links()

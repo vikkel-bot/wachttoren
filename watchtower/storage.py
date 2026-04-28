@@ -178,6 +178,47 @@ class SQLiteStore:
             signals = [signal for signal in signals if signal.get("region", "global").lower() == region_lower]
         return signals[:limit]
 
+    def export_signals(
+        self,
+        limit: int = 1000,
+        asset: str | None = None,
+        asset_class: str | None = None,
+        exchange: str | None = None,
+        region: str | None = None,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 5000))
+        params: list[Any] = []
+        clauses: list[str] = []
+        if asset:
+            clauses.append("asset = ?")
+            params.append(asset.upper())
+
+        query = "SELECT payload FROM signals"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+
+        signals = [json.loads(row["payload"]) for row in rows]
+        filtered = []
+        for signal in signals:
+            if exchange and signal.get("exchange", "GLOBAL").upper() != exchange.upper():
+                continue
+            if region and signal.get("region", "global").lower() != region.lower():
+                continue
+            if asset_class and self._signal_asset_class(signal) != asset_class.lower():
+                continue
+            if not self._inside_range(signal.get("created_at") or signal.get("timestamp"), from_ts, to_ts):
+                continue
+            filtered.append(signal)
+            if len(filtered) >= limit:
+                break
+        return filtered
+
     def upsert_watchlist_item(self, item: Any) -> dict[str, Any]:
         payload = to_jsonable(item)
         payload["asset"] = payload["asset"].upper()
@@ -500,6 +541,36 @@ class SQLiteStore:
                 "avg_return_pct": round(value["return_sum"] / count, 4) if count else 0.0,
             }
         return finalized
+
+    def _signal_asset_class(self, signal: dict[str, Any]) -> str:
+        explicit = signal.get("asset_class") or signal.get("biome")
+        if explicit:
+            return str(explicit).lower()
+        symbol = str(signal.get("asset", ""))
+        return "crypto" if "-" in symbol else "equity"
+
+    def _inside_range(self, value: Any, from_ts: str | None, to_ts: str | None) -> bool:
+        ts = self._parse_ts(value)
+        if ts is None:
+            return True
+        start = self._parse_ts(from_ts)
+        end = self._parse_ts(to_ts)
+        if start and ts < start:
+            return False
+        if end and ts > end:
+            return False
+        return True
+
+    def _parse_ts(self, value: Any) -> datetime | None:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def _watchlist_key(self, exchange: str, asset: str) -> str:
         return f"{exchange.upper()}:{asset.upper()}"

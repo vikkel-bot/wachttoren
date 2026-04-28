@@ -127,6 +127,7 @@ def _seed_assets(exchanges: ExchangeUniverse) -> list[ListedAsset]:
         asset("MSFT", "Microsoft", "NASDAQ", "Technology", "USD", ["Microsoft Corporation"]),
         asset("NVDA", "NVIDIA", "NASDAQ", "Semiconductors", "USD", ["Nvidia Corporation"]),
         asset("TSLA", "Tesla", "NASDAQ", "Consumer Discretionary", "USD", ["Tesla Inc"]),
+        asset("QQQ", "Invesco QQQ Trust", "NASDAQ", "ETF", "USD", ["Nasdaq 100 ETF", "QQQ ETF"]),
         asset("JPM", "JPMorgan Chase", "NYSE", "Financials", "USD", ["JPMorgan", "JP Morgan"]),
         asset("XOM", "Exxon Mobil", "NYSE", "Energy", "USD", ["Exxon"]),
         asset("7203", "Toyota Motor", "JPX", "Automotive", "JPY", ["Toyota"]),
@@ -157,4 +158,8 @@ def _seed_assets(exchanges: ExchangeUniverse) -> list[ListedAsset]:
         asset("ALUMINIUM", "Aluminium", "LME", "Base Metals", "USD", ["lme aluminium", "aluminum"], "commodity"),
         asset("CU", "Shanghai Copper", "SHFE", "Base Metals", "CNY", ["shfe copper"], "commodity"),
         asset("RB", "Steel Rebar", "SHFE", "Industrial Metals", "CNY", ["rebar"], "commodity"),
+        asset("BTC-EUR", "Bitcoin euro spot", "BITVAVO", "Crypto", "EUR", ["bitcoin", "btc"], "crypto"),
+        asset("ETH-EUR", "Ethereum euro spot", "BITVAVO", "Crypto", "EUR", ["ethereum", "ether", "eth"], "crypto"),
+        asset("SOL-EUR", "Solana euro spot", "BITVAVO", "Crypto", "EUR", ["solana", "sol"], "crypto"),
+        asset("ETH-BTC", "Ethereum bitcoin ratio", "BITVAVO", "Crypto", "BTC", ["eth btc", "ethereum bitcoin"], "crypto"),
     ]

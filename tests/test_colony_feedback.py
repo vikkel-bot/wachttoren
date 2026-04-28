@@ -147,6 +147,25 @@ class ColonyFeedbackTests(unittest.TestCase):
         })
         self.assertEqual(resp.status_code, 404)
 
+    def test_backtest_signals_endpoint_exports_colony_ready_payload(self) -> None:
+        signal = self._create_signal(asset="BTC-EUR")
+        signal["asset_class"] = "crypto"
+        signal["linked_assets"] = ["NASDAQ:QQQ", "FX:DXY", "BITVAVO:ETH-BTC"]
+        self.store.save_signal(signal)
+
+        resp = self.client.get("/backtest/signals?asset_class=crypto")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["export_type"], "signals")
+        self.assertEqual(data["count"], 1)
+        exported = data["signals"][0]
+        self.assertEqual(exported["signal_id"], signal["id"])
+        self.assertEqual(exported["asset"], "BTC-EUR")
+        self.assertEqual(exported["asset_class"], "crypto")
+        self.assertEqual(exported["source_field"], "crypto")
+        self.assertIn("NASDAQ:QQQ", exported["linked_assets"])
+
 
 if __name__ == "__main__":
     unittest.main()

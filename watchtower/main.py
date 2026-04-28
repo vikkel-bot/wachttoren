@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -519,6 +519,48 @@ def colony_signals(limit: int = Query(default=50, ge=1, le=250)) -> dict:
     return colony_bridge.build_packet(qualified)
 
 
+@app.get("/backtest/signals")
+def backtest_signals(
+    limit: int = Query(default=1000, ge=1, le=5000),
+    asset: str | None = None,
+    asset_class: str | None = None,
+    exchange: str | None = None,
+    region: str | None = None,
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+) -> dict:
+    resolved_asset = resolver.resolve(asset) if asset else None
+    signals = store.export_signals(
+        limit=limit,
+        asset=resolved_asset,
+        asset_class=asset_class,
+        exchange=exchange,
+        region=region,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    normalized = [
+        _backtest_signal_payload(signal)
+        for signal in signals
+        if signal.get("direction") != "neutral"
+    ]
+    return {
+        "source": "watchtower",
+        "export_type": "signals",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(normalized),
+        "filters": {
+            "asset": resolved_asset,
+            "asset_class": asset_class,
+            "exchange": exchange,
+            "region": region,
+            "from": from_ts,
+            "to": to_ts,
+        },
+        "signals": normalized,
+    }
+
+
 @app.post("/colony/dispatch")
 def colony_dispatch(payload: ColonyDispatchIn) -> dict:
     config = get_colony_config()
@@ -603,7 +645,8 @@ def dashboard_summary() -> dict:
     watched_exchanges = sorted({item.get("exchange", "GLOBAL") for item in store.list_watchlist(enabled_only=True)})
     best_equity_entries = _build_best_entries("equity")
     best_commodity_entries = _build_best_entries("commodity")
-    global_mood = _global_market_mood(best_equity_entries + best_commodity_entries)
+    best_crypto_entries = _build_best_entries("crypto")
+    global_mood = _global_market_mood(best_equity_entries + best_commodity_entries + best_crypto_entries)
     return {
         **store.dashboard_summary(),
         "colony_config": get_colony_config(),
@@ -612,6 +655,7 @@ def dashboard_summary() -> dict:
         "asset_class_counts": _asset_class_counts(),
         "best_equity_entries": best_equity_entries,
         "best_commodity_entries": best_commodity_entries,
+        "best_crypto_entries": best_crypto_entries,
         "global_mood": global_mood,
         "news_radar": news_radar.dashboard_summary(store.list_events(limit=50)),
         "intermarket_links": intermarket_engine.dashboard_links(),
@@ -1056,6 +1100,42 @@ def _intermarket_link_row(link: dict) -> str:
     )
 
 
+def _backtest_signal_payload(signal: dict) -> dict:
+    timestamp = signal.get("timestamp") or signal.get("created_at")
+    asset = str(signal.get("asset") or signal.get("symbol") or "").upper()
+    asset_class = str(signal.get("asset_class") or _infer_asset_class(asset)).lower()
+    direction = str(signal.get("direction") or "").lower()
+    return {
+        "signal_id": signal.get("signal_id") or signal.get("id"),
+        "id": signal.get("id"),
+        "asset": asset,
+        "symbol": asset,
+        "direction": direction,
+        "timestamp": timestamp,
+        "created_at": signal.get("created_at"),
+        "expires_at": signal.get("expires_at"),
+        "entry_score": signal.get("entry_score", 0.0),
+        "confidence": signal.get("confidence", 0.0),
+        "asset_class": asset_class,
+        "source_field": signal.get("source_field") or asset_class,
+        "exchange": signal.get("exchange"),
+        "region": signal.get("region"),
+        "time_window": signal.get("time_window"),
+        "risk_flags": signal.get("risk_flags", []),
+        "linked_assets": signal.get("linked_assets", []),
+        "linked_markets": signal.get("linked_markets", []),
+        "intermarket_drivers": signal.get("intermarket_drivers", []),
+        "intermarket_context": signal.get("intermarket_context", {}),
+        "components": signal.get("components", {}),
+        "reason": signal.get("reason", ""),
+        "watchtower_export_version": "signals.v1",
+    }
+
+
+def _infer_asset_class(asset: str) -> str:
+    return "crypto" if "-" in asset else "equity"
+
+
 def _score_signal(event, market, exchange, asset_info: dict | None) -> dict:
     signal = regional_scorer.score(event, market, exchange, asset_info=asset_info)
     if not exchange:
@@ -1067,6 +1147,8 @@ def _score_signal(event, market, exchange, asset_info: dict | None) -> dict:
     signal["linked_assets"] = context.get("linked_assets", [])
     signal["linked_markets"] = context.get("linked_markets", [])
     signal["intermarket_drivers"] = context.get("drivers", [])
+    signal["asset_class"] = context.get("asset_class", signal.get("asset_class", "equity"))
+    signal["source_field"] = signal["asset_class"]
     signal["components"]["intermarket_adjustment"] = adjustment
     signal["entry_score"] = round(_clamp_score(float(signal["entry_score"]) + adjustment), 4)
     signal["confidence"] = round(_clamp_score(float(signal["confidence"]) + (adjustment * 0.5)), 4)

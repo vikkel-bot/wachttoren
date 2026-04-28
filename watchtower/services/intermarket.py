@@ -7,6 +7,27 @@ from watchtower.services.exchanges import Exchange
 
 
 class IntermarketEngine:
+    CRYPTO_LINKS = {
+        "BTC": {
+            "drivers": ["btc_vs_qqq_risk_beta", "btc_vs_dxy_usd_liquidity", "crypto_24_7_lead_lag"],
+            "linked_markets": ["Crypto", "NASDAQ", "FX"],
+            "linked_assets": ["NASDAQ:QQQ", "FX:DXY", "BITVAVO:ETH-BTC", "BITVAVO:ETH-EUR"],
+            "thesis": "BTC is treated as a 24/7 risk bridge: compare it with QQQ for growth appetite and DXY for USD liquidity pressure.",
+        },
+        "ETH": {
+            "drivers": ["eth_btc_rotation", "btc_beta", "crypto_liquidity", "risk_appetite"],
+            "linked_markets": ["Crypto", "NASDAQ", "FX"],
+            "linked_assets": ["BITVAVO:BTC-EUR", "BITVAVO:ETH-BTC", "NASDAQ:QQQ", "FX:DXY"],
+            "thesis": "ETH needs confirmation from BTC trend, ETH/BTC rotation and broader risk appetite before conviction rises.",
+        },
+        "ETH-BTC": {
+            "drivers": ["eth_btc_ratio", "smart_contract_rotation", "crypto_relative_strength"],
+            "linked_markets": ["Crypto", "NASDAQ"],
+            "linked_assets": ["BITVAVO:BTC-EUR", "BITVAVO:ETH-EUR", "NASDAQ:QQQ"],
+            "thesis": "ETH/BTC is a relative-strength ratio that helps distinguish broad crypto beta from ETH-specific rotation.",
+        },
+    }
+
     COMMODITY_LINKS = {
         "GOLD": {
             "drivers": ["real_rates", "usd_strength", "risk_off_flows"],
@@ -115,13 +136,18 @@ class IntermarketEngine:
         "Asia": ["US close often affects Asia open", "China demand affects commodities and resource markets"],
         "Africa": ["Commodity prices and currency pressure affect liquidity-sensitive markets"],
         "Commodities": ["Commodity moves transmit into inflation, sector rotation and resource equities"],
+        "Crypto": ["Crypto trades continuously and can lead risk appetite before equity sessions open"],
     }
 
     def context(self, asset_info: dict[str, Any] | None, exchange: Exchange, market: MarketSnapshot) -> dict[str, Any]:
         symbol = (asset_info or {}).get("symbol", market.asset).upper()
         asset_class = (asset_info or {}).get("asset_class", "equity")
+        crypto_symbol = self._crypto_symbol(symbol)
+        if asset_class == "crypto" or exchange.market_type == "crypto" or crypto_symbol in self.CRYPTO_LINKS:
+            asset_class = "crypto"
         sector = (asset_info or {}).get("sector", "")
         commodity = self.COMMODITY_LINKS.get(symbol)
+        crypto = self.CRYPTO_LINKS.get(crypto_symbol)
         sector_link = self.SECTOR_LINKS.get(sector, {})
 
         drivers: list[str] = []
@@ -136,6 +162,17 @@ class IntermarketEngine:
             linked_markets.extend(commodity["linked_markets"])
             theses.append(commodity["thesis"])
             flags.append("commodity_cross_market_driver")
+
+        if crypto:
+            drivers.extend(crypto["drivers"])
+            linked_assets.extend(crypto["linked_assets"])
+            linked_markets.extend(crypto["linked_markets"])
+            theses.append(crypto["thesis"])
+            flags.append("crypto_cross_field_driver")
+            if market.volatility_zscore >= 2.0:
+                flags.append("crypto_volatility_elevated")
+            if market.trend_1d < -0.35:
+                flags.append("crypto_risk_appetite_weak")
 
         if sector_link:
             drivers.extend(sector_link["drivers"])
@@ -201,12 +238,23 @@ class IntermarketEngine:
                 "linked": ["NASDAQ:TSLA", "JPX:7203", "SSE", "SZSE", "JSE"],
                 "effect": "Infrastructure and electrification demand can support materials, automotives and selected tech supply chains.",
             },
+            {
+                "theme": "Crypto risk bridge",
+                "drivers": ["BTC vs QQQ", "BTC vs DXY", "ETH/BTC ratio"],
+                "linked": ["BITVAVO:BTC-EUR", "BITVAVO:ETH-BTC", "NASDAQ:QQQ", "FX:DXY"],
+                "effect": "Crypto momentum can lead risk appetite outside equity hours, while USD strength and ETH/BTC rotation can filter entry quality.",
+            },
         ]
 
     def _adjustment(self, asset_class: str, sector: str, exchange: Exchange, market: MarketSnapshot) -> float:
         adjustment = 0.0
+        asset_class = asset_class.lower()
         if asset_class == "commodity" and market.volume_zscore >= 1.8:
             adjustment += 0.02
+        if asset_class == "crypto" and market.volume_zscore >= 1.5 and market.trend_1d >= 0.25:
+            adjustment += 0.02
+        if asset_class == "crypto" and market.volatility_zscore >= 2.2:
+            adjustment -= 0.02
         if sector in {"Technology", "Semiconductors"} and market.volume_zscore >= 1.8:
             adjustment += 0.015
         if sector == "Energy" and market.volatility_zscore >= 1.7:
@@ -214,3 +262,13 @@ class IntermarketEngine:
         if exchange.region == "Africa" and market.volatility_zscore >= 1.5:
             adjustment -= 0.02
         return round(adjustment, 4)
+
+    def _crypto_symbol(self, symbol: str) -> str:
+        normalized = symbol.upper().replace("/", "-").replace("_", "-")
+        if normalized == "ETH-BTC":
+            return "ETH-BTC"
+        if normalized.startswith("BTC"):
+            return "BTC"
+        if normalized.startswith("ETH"):
+            return "ETH"
+        return normalized

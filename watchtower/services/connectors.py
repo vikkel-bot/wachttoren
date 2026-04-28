@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
 from watchtower.domain import MarketSnapshot, NewsEvent, utc_now
+from watchtower.services.crypto_market import CryptoMarketAdapter
 from watchtower.services.resolver import AssetResolver
 
 
@@ -66,6 +67,7 @@ def parse_datetime(value: str | None) -> datetime:
 class ConnectorRegistry:
     def __init__(self, resolver: AssetResolver | None = None) -> None:
         self.resolver = resolver or AssetResolver()
+        self.crypto_market = CryptoMarketAdapter()
 
     def list_connectors(self) -> list[dict]:
         return [
@@ -99,6 +101,12 @@ class ConnectorRegistry:
                 "requires": [],
                 "description": "Region-aware demo market snapshot for exchange pipeline testing.",
             },
+            {
+                "name": "bitvavo-public",
+                "type": "market",
+                "requires": [],
+                "description": "Public Bitvavo crypto ticker and 1h candles for BTC-EUR, ETH-EUR, ETH-BTC and other pairs.",
+            },
         ]
 
     def fetch_news(
@@ -122,6 +130,8 @@ class ConnectorRegistry:
     def fetch_market(self, connector: str, asset: str, exchange: str | None = None) -> MarketSnapshot:
         connector = connector.lower()
         resolved_asset = self.resolver.resolve(asset)
+        if connector in {"bitvavo-public", "crypto-public"}:
+            return self.crypto_market.fetch_snapshot(resolved_asset)
         if connector not in {"mock-market", "mock-regional-market"}:
             raise ValueError(f"Unknown market connector: {connector}")
         profile = self._market_profile(exchange)

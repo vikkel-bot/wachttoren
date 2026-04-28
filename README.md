@@ -5,7 +5,7 @@ Watchtower is een losse entry-intelligence service. Hij verzamelt events en mark
 ## Wat zit erin
 
 - FastAPI service met health, event, market, signal en outcome endpoints
-- Connectorlaag voor mock news, publieke RSS-feeds en mock market snapshots
+- Connectorlaag voor mock news, publieke RSS-feeds, mock market snapshots en public Bitvavo crypto market-data
 - News Radar voor GDELT/RSS/officiele headlines binnen een EUR25-maandbudget
 - Exchange Universe voor AEX, Nasdaq, grote Aziatische beurzen en Afrikaanse beurzen
 - Regionale watchlist met thresholds per exchange + asset
@@ -17,10 +17,12 @@ Watchtower is een losse entry-intelligence service. Hij verzamelt events en mark
 - Outcome tracker en learning summary om signalen achteraf te labelen
 - Colony output als gefilterd signaalpakket of optionele webhook
 - Listed asset universe en entity resolver per beurs
-- Onderscheid tussen `equity` en `commodity` assets
+- Onderscheid tussen `equity`, `commodity` en `crypto` assets
+- Cross-field context voor `BTC vs QQQ`, `BTC vs DXY` en de `ETH/BTC` ratio
 - Provider registry voor mock, RSS en geplande echte data providers
 - Pipeline-run endpoint om watched assets automatisch te evalueren
-- Dashboard met equity entries, commodity entries en globale marktkleur
+- Dashboard met equity entries, commodity entries, crypto entries en globale marktkleur
+- `/backtest/signals` export voor Colony v2 replay/backtests
 - Mock/demo flow zonder echte news API of broker
 
 ## Installeren
@@ -125,6 +127,19 @@ $body = @{
 } | ConvertTo-Json
 ```
 
+Voor public crypto market-data via Bitvavo:
+
+```powershell
+$body = @{
+  connector = "bitvavo-public"
+  asset = "BTC-EUR"
+  exchange = "BITVAVO"
+  ingest = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/connectors/market/fetch -Body $body -ContentType "application/json"
+```
+
 ### 1b. News Radar onder EUR25 per maand
 
 De radar gebruikt eerst gratis bronnen: GDELT, publieke RSS-feeds en officiele centrale-bankfeeds. Betaalde bronnen zoals X API en NewsAPI productie staan bewust uit tot de radar waarde bewijst.
@@ -218,6 +233,15 @@ $body = @{
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/colony/dispatch -Body $body -ContentType "application/json"
 ```
 
+### 5b. Backtest signal export
+
+Deze endpoint exporteert immutable Watchtower-signalen in een vorm die Colony v2 kan replayen. Watchtower trade niet zelf; Colony leest de signalen en test ze tegen historische candles.
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/backtest/signals?asset_class=crypto"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/backtest/signals?exchange=BITVAVO&from=2026-04-01T00:00:00Z"
+```
+
 ### 6. Dashboard
 
 ```powershell
@@ -243,6 +267,7 @@ Seeded markets:
 - Asia: `JPX`, `HKEX`, `SSE`, `SZSE`, `NSE_IN`, `BSE_IN`, `SGX`, `KRX`, `TWSE`
 - Africa: `JSE`, `EGX`, `NGX`, `NSE_KE`, `CSE_MA`
 - Commodities: `COMEX`, `NYMEX`, `ICE`, `LME`, `SHFE`
+- Crypto: `BITVAVO`
 
 Let op: de huidige trading calendar ondersteunt weekends en seeded reguliere sessies. Officiele feestdagen, half-days en lokale uitzonderingen zijn de volgende stap voordat dit voor echte live entry-timing gebruikt wordt.
 
@@ -260,6 +285,7 @@ Geimplementeerd voor deze MVP:
 - `mock-regional-news`
 - `mock-market`
 - `mock-regional-market`
+- `bitvavo-public`
 - `rss`
 
 Gepland als echte providers:
@@ -275,6 +301,7 @@ Gepland als echte providers:
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/assets?exchange=AEX"
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/assets?region=Asia"
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/assets?asset_class=commodity"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/assets?asset_class=crypto"
 
 $body = @{
   text = "ASML reports stronger chip demand"
@@ -308,6 +335,18 @@ $body = @{
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/watchlist/seed -Body $body -ContentType "application/json"
 ```
 
+Voor crypto:
+
+```powershell
+$body = @{
+  exchange = "BITVAVO"
+  asset_class = "crypto"
+  max_assets = 4
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/watchlist/seed -Body $body -ContentType "application/json"
+```
+
 ### Pipeline draaien
 
 ```powershell
@@ -316,6 +355,21 @@ $body = @{
   news_connector = "mock-regional-news"
   market_connector = "mock-regional-market"
   max_assets = 5
+  max_events_per_asset = 1
+  persist = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/pipeline/run -Body $body -ContentType "application/json"
+```
+
+Crypto pipeline met echte public market-data:
+
+```powershell
+$body = @{
+  exchange = "BITVAVO"
+  news_connector = "mock-regional-news"
+  market_connector = "bitvavo-public"
+  max_assets = 4
   max_events_per_asset = 1
   persist = $true
 } | ConvertTo-Json
@@ -335,7 +389,8 @@ Het dashboard toont nu:
 
 - beste equity entry per markt
 - beste commodity entry per commodity-markt
-- aparte counts voor equities en commodities
+- beste crypto entry per crypto-markt
+- aparte counts voor equities, commodities en crypto
 - globale achtergrondkleur: groen bij brede plus, oranje bij sideways, rood bij brede daling
 
 ## Nog Niet Production Ready
