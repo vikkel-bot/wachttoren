@@ -16,6 +16,7 @@ from watchtower.domain import MarketSnapshot, NewsEvent
 from watchtower.main import _backtest_signal_payload, _score_signal, asset_universe, exchange_universe
 from watchtower.models import MarketSnapshotIn, NewsEventIn, SignalEvaluationIn
 from watchtower.services.connectors import ConnectorRegistry, RateLimitError
+from watchtower.services.crypto_market import CryptoMarketAdapter
 from watchtower.services.seed_signals import append_seed_signals, seed_signals_path
 from watchtower.storage import to_jsonable
 
@@ -26,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     to_dt = _parse_datetime(args.to_dt)
     assets = _assets(args.assets)
     connectors = ConnectorRegistry()
+    crypto_market = CryptoMarketAdapter()
+    candle_cache: dict[tuple[str, str], MarketSnapshot | None] = {}
     output_path = Path(args.output) if args.output else seed_signals_path()
 
     all_signals: list[dict[str, Any]] = []
@@ -43,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
                 from_dt=from_dt,
                 to_dt=to_dt,
                 connectors=connectors,
+                crypto_market=crypto_market,
+                candle_cache=candle_cache,
                 dry_run=args.dry_run,
             )
         except Exception as exc:
@@ -75,6 +80,8 @@ def seed_asset(
     from_dt: datetime,
     to_dt: datetime,
     connectors: ConnectorRegistry,
+    crypto_market: CryptoMarketAdapter | None = None,
+    candle_cache: dict[tuple[str, str], MarketSnapshot | None] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     news_events = connectors.fetch_historical_news(
@@ -92,6 +99,8 @@ def seed_asset(
         "candidate_articles": len(relevant_events),
         "sentiment_events": len(sentiment_events),
         "signals_generated": 0,
+        "historical_candles": 0,
+        "degraded": 0,
         "avg_entry_score": None,
         "avg_sentiment": _avg([event.sentiment for event in sentiment_events]),
         "signals": [],
@@ -99,13 +108,27 @@ def seed_asset(
     if dry_run:
         return result
 
-    market = connectors.fetch_market("bitvavo-public", asset, exchange=exchange)
+    crypto_market = crypto_market or CryptoMarketAdapter()
+    candle_cache = candle_cache if candle_cache is not None else {}
+    live_market_fallback = _fetch_live_market_fallback(connectors, asset, exchange)
     generated: list[dict[str, Any]] = []
     entry_scores: list[float] = []
     article_sentiments: list[float] = []
 
     for event in relevant_events:
         enriched_event = _with_backfilled_sentiment(event, sentiment_events)
+        market = _fetch_historical_market(asset, enriched_event.published_at, crypto_market, candle_cache)
+        if market is None:
+            market = live_market_fallback
+            signal_quality = "degraded"
+        else:
+            signal_quality = "historical"
+            result["historical_candles"] += 1
+        if market is None:
+            continue
+        if signal_quality == "degraded":
+            result["degraded"] += 1
+
         article_sentiments.append(enriched_event.sentiment)
         payload = _evaluation_payload(enriched_event, market)
         exchange_obj = exchange_universe.get(exchange)
@@ -122,6 +145,8 @@ def seed_asset(
             continue
         # neutral signalen worden WEL opgeslagen in seed context
         # backtest beslist zelf of het iets mee doet
+        signal["seed_market_quality"] = signal_quality
+        signal["seed_market_timestamp"] = enriched_event.published_at.isoformat()
         normalized = _backtest_signal_payload(signal)
         generated.append(normalized)
         entry_scores.append(float(normalized.get("entry_score") or 0.0))
@@ -131,6 +156,32 @@ def seed_asset(
     result["avg_entry_score"] = _avg(entry_scores)
     result["avg_sentiment"] = _avg(article_sentiments) if article_sentiments else result["avg_sentiment"]
     return result
+
+
+def _fetch_live_market_fallback(
+    connectors: ConnectorRegistry,
+    asset: str,
+    exchange: str,
+) -> MarketSnapshot | None:
+    try:
+        return connectors.fetch_market("bitvavo-public", asset, exchange=exchange)
+    except Exception as exc:
+        print(f"{asset}: live market fallback niet beschikbaar: {exc}")
+        return None
+
+
+def _fetch_historical_market(
+    asset: str,
+    published_at: datetime,
+    crypto_market: CryptoMarketAdapter,
+    candle_cache: dict[tuple[str, str], MarketSnapshot | None],
+) -> MarketSnapshot | None:
+    moment = published_at if published_at.tzinfo else published_at.replace(tzinfo=timezone.utc)
+    hour_bucket = moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00")
+    key = (asset.upper(), hour_bucket)
+    if key not in candle_cache:
+        candle_cache[key] = crypto_market.fetch_historical_snapshot(asset, moment)
+    return candle_cache[key]
 
 
 def _fetch_sentiment_events(
@@ -221,6 +272,8 @@ def _asset_summary(asset: str, result: dict[str, Any]) -> str:
         f"kandidaten={result['candidate_articles']} "
         f"sentiment_events={result['sentiment_events']} "
         f"signalen={result['signals_generated']} "
+        f"historical_candles={result['historical_candles']} "
+        f"degraded={result['degraded']} "
         f"avg_entry_score={_fmt(result['avg_entry_score'])} "
         f"avg_sentiment={_fmt(result['avg_sentiment'])}"
     )

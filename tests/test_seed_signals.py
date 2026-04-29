@@ -34,6 +34,7 @@ def test_seed_script_dry_run_writes_no_file(monkeypatch, tmp_path, capsys):
 def test_seed_script_generates_signals_from_mock_news(monkeypatch, tmp_path):
     fake = _FakeConnectors()
     monkeypatch.setattr(seed_script, "ConnectorRegistry", lambda: fake)
+    monkeypatch.setattr(seed_script, "CryptoMarketAdapter", lambda: _FakeCryptoMarket())
     monkeypatch.setattr(seed_script, "_score_signal", _fake_score_signal)
     output = tmp_path / "seed.jsonl"
 
@@ -52,6 +53,7 @@ def test_seed_script_generates_signals_from_mock_news(monkeypatch, tmp_path):
     assert rows[0]["direction"] == "long"
     assert rows[0]["timestamp"] == "2026-03-15T10:00:00+00:00"
     assert rows[0]["entry_score"] == 0.81
+    assert rows[0]["seed_market_quality"] == "historical"
 
 
 def test_backtest_seed_endpoint_filters_asset(monkeypatch, tmp_path):
@@ -141,6 +143,18 @@ class _FakeConnectors:
             trend_1h=0.5,
             trend_1d=0.4,
             benchmark_change_1d_pct=1.0,
+        )
+
+
+class _FakeCryptoMarket:
+    def fetch_historical_snapshot(self, asset, at, interval="1h"):
+        return MarketSnapshot(
+            asset=asset,
+            price=60000.0,
+            volume_zscore=1.0,
+            trend_1h=0.4,
+            trend_1d=0.0,
+            benchmark_change_1d_pct=0.0,
         )
 
 

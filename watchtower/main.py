@@ -1233,6 +1233,10 @@ def _backtest_signal_payload(signal: dict) -> dict:
         "intermarket_context": signal.get("intermarket_context", {}),
         "components": signal.get("components", {}),
         "reason": signal.get("reason", ""),
+        "seed_source": signal.get("seed_source"),
+        "sentiment_quality": signal.get("sentiment_quality"),
+        "seed_market_quality": signal.get("seed_market_quality"),
+        "seed_market_timestamp": signal.get("seed_market_timestamp"),
         "watchtower_export_version": "signals.v1",
     }
 

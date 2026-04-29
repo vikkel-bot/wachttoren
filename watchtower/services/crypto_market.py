@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
 from typing import Any
 
@@ -51,9 +53,11 @@ class CryptoMarketAdapter:
         self,
         fetch_json: Callable[[str], Any] | None = None,
         timeout_seconds: float = 8.0,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._fetch_json = fetch_json or self._urlopen_json
         self.timeout_seconds = timeout_seconds
+        self._sleep = sleeper
 
     def fetch_snapshot(self, asset: str, quote: str = "EUR") -> MarketSnapshot:
         market = self.market_code(asset, quote=quote)
@@ -73,6 +77,38 @@ class CryptoMarketAdapter:
             raise CryptoMarketDataError(f"Missing usable price for {market}")
 
         return self._snapshot_from_candles(market, price, candles)
+
+    def fetch_historical_snapshot(
+        self,
+        asset: str,
+        at: datetime,
+        interval: str = "1h",
+    ) -> MarketSnapshot | None:
+        """
+        Return a market snapshot based on the candle closest to ``at``.
+
+        This is intentionally conservative: it only uses the nearby OHLCV
+        candle and does not infer 1d or volume baselines from future data.
+        """
+        try:
+            market = self.market_code(asset)
+            moment = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+            moment = moment.astimezone(timezone.utc)
+            start_ms = int((moment - timedelta(hours=1)).timestamp() * 1000)
+            end_ms = int((moment + timedelta(hours=1)).timestamp() * 1000)
+            url = (
+                f"{self.BITVAVO_BASE_URL}/{urllib.parse.quote(market)}/candles"
+                f"?interval={urllib.parse.quote(interval)}&limit=3&start={start_ms}&end={end_ms}"
+            )
+            candles = self._parse_candles(self._request_json(url))
+            self._sleep(0.1)
+            if not candles:
+                return None
+            target_ms = int(moment.timestamp() * 1000)
+            candle = min(candles, key=lambda item: abs(item.timestamp - target_ms))
+            return self._snapshot_from_single_candle(market, candle)
+        except Exception:
+            return None
 
     def _fetch_synthetic_ratio(self, market: str) -> MarketSnapshot:
         base_market, quote_market = self.SYNTHETIC_MARKETS[market]
@@ -208,6 +244,26 @@ class CryptoMarketAdapter:
             trend_1d=round(self._trend(change_1d, scale=6.0), 4),
             sector_change_1d_pct=round(change_1d, 4),
             benchmark_change_1d_pct=round(change_1d, 4),
+        )
+
+    def _snapshot_from_single_candle(self, market: str, candle: Candle) -> MarketSnapshot | None:
+        if min(candle.open, candle.high, candle.low, candle.close) <= 0:
+            return None
+        change_1h = ((candle.close - candle.open) / candle.open) * 100.0
+        volatility_proxy = (candle.high - candle.low) / candle.close
+        trend_1h = max(-1.0, min(1.0, change_1h / 5.0))
+        return MarketSnapshot(
+            asset=market,
+            price=round(candle.close, 8),
+            change_15m_pct=round(change_1h / 4.0, 4),
+            change_1h_pct=round(change_1h, 4),
+            change_1d_pct=0.0,
+            volume_zscore=0.0,
+            volatility_zscore=round(volatility_proxy, 4),
+            trend_1h=round(trend_1h, 4),
+            trend_1d=0.0,
+            sector_change_1d_pct=0.0,
+            benchmark_change_1d_pct=0.0,
         )
 
     @staticmethod
