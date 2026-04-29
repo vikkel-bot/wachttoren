@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -40,7 +41,7 @@ from watchtower.services.providers import ProviderRegistry
 from watchtower.services.regional_scoring import RegionalEntryScorer
 from watchtower.services.resolver import AssetResolver
 from watchtower.services.scoring import EntryScorer
-from watchtower.services.seed_signals import filter_seed_signals, read_seed_signals
+from watchtower.services.seed_signals import filter_seed_signals, read_seed_signals, seed_signals_path
 from watchtower.storage import SQLiteStore, to_jsonable
 
 
@@ -772,9 +773,22 @@ def dashboard_summary() -> dict:
     }
 
 
+@app.get("/dashboard/intelligence")
+def dashboard_intelligence() -> dict:
+    return _dashboard_intelligence()
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
     summary = dashboard_summary()
+    intelligence = dashboard_intelligence()
+    positive_signal_rows = "".join(
+        _positive_signal_item(signal) for signal in intelligence["positive_signals"]
+    ) or "<p class='empty'>Geen actieve signalen</p>"
+    recommended_asset_rows = "".join(
+        _recommended_asset_item(asset) for asset in intelligence["recommended_assets"]
+    ) or "<p class='empty'>Geen aanbevolen assets</p>"
+    backtest_status_html = _backtest_status_card(intelligence["backtest_status"])
     latest_rows = "".join(
         _signal_row(signal) for signal in summary["latest_signals"]
     ) or "<tr><td colspan='9'>No signals yet</td></tr>"
@@ -799,7 +813,7 @@ def dashboard() -> HTMLResponse:
         _news_radar_row(event) for event in summary["news_radar"]["recent_events"]
     ) or "<tr><td colspan='8'>No radar events yet</td></tr>"
     intermarket_rows = "".join(
-        _intermarket_link_row(link) for link in summary["intermarket_links"]
+        _intermarket_context_row(link) for link in intelligence["intermarket_context"]
     )
     learning = summary["learning"]
     mood = summary["global_mood"]
@@ -875,6 +889,93 @@ def dashboard() -> HTMLResponse:
           grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
           gap: 12px;
           margin-bottom: 18px;
+        }}
+        .intelligence {{
+          padding: 0;
+          overflow: hidden;
+          border-color: #c9d5df;
+        }}
+        .intel-title {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 16px 16px 12px;
+          border-bottom: 1px solid var(--line);
+        }}
+        .intel-title h2 {{
+          margin-bottom: 0;
+        }}
+        .intel-columns {{
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }}
+        .intel-col {{
+          min-height: 230px;
+          padding: 14px 16px 16px;
+          border-right: 1px solid var(--line);
+        }}
+        .intel-col:last-child {{
+          border-right: 0;
+        }}
+        .intel-col.positive {{
+          background: #eef8f1;
+        }}
+        .intel-col.recommended {{
+          background: #eef6fb;
+        }}
+        .intel-col.status {{
+          background: #f4f6f8;
+        }}
+        .intel-heading {{
+          font-size: 12px;
+          font-weight: 700;
+          text-transform: uppercase;
+          margin-bottom: 10px;
+        }}
+        .intel-item {{
+          border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+          padding: 10px 0;
+        }}
+        .intel-item:first-of-type {{
+          border-top: 0;
+          padding-top: 0;
+        }}
+        .intel-main {{
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 10px;
+          font-weight: 700;
+        }}
+        .intel-meta {{
+          margin-top: 5px;
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.35;
+        }}
+        .intel-reason {{
+          margin-top: 6px;
+          font-size: 13px;
+          line-height: 1.35;
+        }}
+        .status-grid {{
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }}
+        .status-cell {{
+          border-top: 1px solid var(--line);
+          padding-top: 8px;
+        }}
+        .status-number {{
+          display: block;
+          font-size: 20px;
+          font-weight: 700;
+        }}
+        .empty {{
+          color: var(--muted);
+          margin: 8px 0 0;
         }}
         .metric, section {{
           background: var(--panel);
@@ -965,6 +1066,13 @@ def dashboard() -> HTMLResponse:
           .grid {{
             grid-template-columns: repeat(2, minmax(0, 1fr));
           }}
+          .intel-columns {{
+            grid-template-columns: 1fr;
+          }}
+          .intel-col {{
+            border-right: 0;
+            border-bottom: 1px solid var(--line);
+          }}
         }}
       </style>
     </head>
@@ -974,6 +1082,26 @@ def dashboard() -> HTMLResponse:
           <h1>Watchtower</h1>
           <span>{escape(str(db_path))}</span>
         </header>
+        <section class="intelligence">
+          <div class="intel-title">
+            <h2>Signal Intelligence Panel</h2>
+            <span class="label">Wat test positief en waarom</span>
+          </div>
+          <div class="intel-columns">
+            <div class="intel-col positive">
+              <div class="intel-heading">Positieve Signalen</div>
+              {positive_signal_rows}
+            </div>
+            <div class="intel-col recommended">
+              <div class="intel-heading">Aanbevolen Assets</div>
+              {recommended_asset_rows}
+            </div>
+            <div class="intel-col status">
+              <div class="intel-heading">Backtest Status</div>
+              {backtest_status_html}
+            </div>
+          </div>
+        </section>
         <div class="grid">
           <div class="metric"><div class="label">Recent Signals</div><div class="value">{summary["signal_count"]}</div></div>
           <div class="metric mood"><div class="label">Global Mood</div><div class="value">{escape(str(mood["label"]))}</div></div>
@@ -1015,15 +1143,6 @@ def dashboard() -> HTMLResponse:
           </table>
         </section>
         <section>
-          <h2>Intermarket Links</h2>
-          <table>
-            <thead>
-              <tr><th>Theme</th><th>Drivers</th><th>Linked Markets / Assets</th><th>Likely Effect</th></tr>
-            </thead>
-            <tbody>{intermarket_rows}</tbody>
-          </table>
-        </section>
-        <section>
           <h2>Exchange Coverage</h2>
           <table>
             <thead>
@@ -1048,6 +1167,15 @@ def dashboard() -> HTMLResponse:
               <tr><th>Exchange</th><th>Asset</th><th>Class</th><th>Direction</th><th>Score</th><th>Confidence</th><th>Drivers</th><th>Links</th><th>Reason</th></tr>
             </thead>
             <tbody>{latest_rows}</tbody>
+          </table>
+        </section>
+        <section>
+          <h2>Intermarket Links</h2>
+          <table>
+            <thead>
+              <tr><th>Driver</th><th>Richting</th><th>Sterkte</th><th>Uitleg</th></tr>
+            </thead>
+            <tbody>{intermarket_rows}</tbody>
           </table>
         </section>
         <section>
@@ -1094,6 +1222,289 @@ def mock_signal() -> dict:
     ).to_domain("AAPL")
     signal = scorer.score(event, market)
     return to_jsonable(signal)
+
+
+def _dashboard_intelligence() -> dict:
+    recent_signals = store.list_signals(limit=250)
+    latest_50 = store.list_signals(limit=50)
+    feedback_summary = store.colony_feedback_stats()
+    return {
+        "positive_signals": _positive_signals(recent_signals),
+        "recommended_assets": _recommended_assets(latest_50),
+        "backtest_status": _backtest_status(recent_signals, feedback_summary),
+        "colony_feedback_summary": feedback_summary,
+        "intermarket_context": _dashboard_intermarket_context(intermarket_engine.dashboard_links()),
+    }
+
+
+def _positive_signals(signals: list[dict]) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    positive = []
+    for signal in signals:
+        direction = str(signal.get("direction") or "").lower()
+        if direction not in {"long", "short"}:
+            continue
+        timestamp = _dashboard_ts(signal)
+        if timestamp and timestamp < cutoff:
+            continue
+        positive.append(_positive_signal_payload(signal, timestamp))
+
+    positive.sort(key=lambda item: (float(item["entry_score"]), float(item["confidence"])), reverse=True)
+    return positive[:10]
+
+
+def _positive_signal_payload(signal: dict, timestamp: datetime | None) -> dict:
+    reason = str(signal.get("reason") or "")
+    direction = str(signal.get("direction") or "").lower()
+    return {
+        "signal_id": signal.get("id") or signal.get("signal_id"),
+        "asset": str(signal.get("asset") or signal.get("symbol") or "").upper(),
+        "direction": direction,
+        "entry_score": round(_safe_float(signal.get("entry_score")), 4),
+        "confidence": round(_safe_float(signal.get("confidence")), 4),
+        "time_window": signal.get("time_window"),
+        "reason": reason,
+        "reason_preview": reason[:80],
+        "timestamp": timestamp.isoformat() if timestamp else signal.get("created_at") or signal.get("timestamp"),
+    }
+
+
+def _recommended_assets(signals: list[dict]) -> list[dict]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        asset = str(signal.get("asset") or signal.get("symbol") or "").upper()
+        if not asset:
+            continue
+        bucket = buckets.setdefault(
+            asset,
+            {
+                "asset": asset,
+                "name": _asset_display_name(signal),
+                "exchange": signal.get("exchange"),
+                "long_signals": 0,
+                "short_signals": 0,
+                "signal_count": 0,
+                "score_sum": 0.0,
+                "confidence_sum": 0.0,
+                "latest_signal": None,
+                "latest_reason": "",
+            },
+        )
+        direction = str(signal.get("direction") or "").lower()
+        if direction == "long":
+            bucket["long_signals"] += 1
+        elif direction == "short":
+            bucket["short_signals"] += 1
+        bucket["signal_count"] += 1
+        bucket["score_sum"] += _safe_float(signal.get("entry_score"))
+        bucket["confidence_sum"] += _safe_float(signal.get("confidence"))
+        timestamp = _dashboard_ts(signal)
+        if timestamp and (bucket["latest_signal"] is None or timestamp > bucket["latest_signal"]):
+            bucket["latest_signal"] = timestamp
+            bucket["latest_reason"] = str(signal.get("reason") or "")
+
+    recommendations = []
+    for bucket in buckets.values():
+        count = int(bucket["signal_count"])
+        if count <= 0:
+            continue
+        avg_score = bucket["score_sum"] / count
+        if avg_score < 0.5:
+            continue
+        long_count = int(bucket["long_signals"])
+        short_count = int(bucket["short_signals"])
+        if long_count > short_count:
+            bias = "LONG"
+        elif short_count > long_count:
+            bias = "SHORT"
+        else:
+            bias = "MIXED"
+        recommendations.append(
+            {
+                "asset": bucket["asset"],
+                "name": bucket["name"],
+                "exchange": bucket["exchange"],
+                "bias": bias,
+                "long_signals": long_count,
+                "short_signals": short_count,
+                "signal_count": count,
+                "avg_entry_score": round(avg_score, 4),
+                "avg_confidence": round(bucket["confidence_sum"] / count, 4),
+                "latest_signal": bucket["latest_signal"].isoformat() if bucket["latest_signal"] else None,
+                "reason_preview": str(bucket.get("latest_reason") or "")[:100],
+            }
+        )
+
+    recommendations.sort(key=lambda item: (item["avg_entry_score"], item["avg_confidence"]), reverse=True)
+    return recommendations
+
+
+def _backtest_status(recent_signals: list[dict], feedback_summary: dict) -> dict:
+    seed_signals = read_seed_signals()
+    seed_path = seed_signals_path()
+    latest_seed_run = None
+    if seed_path.exists():
+        latest_seed_run = datetime.fromtimestamp(seed_path.stat().st_mtime, timezone.utc).isoformat()
+    seven_day_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    live_signals_7d = sum(
+        1
+        for signal in recent_signals
+        if (timestamp := _dashboard_ts(signal)) is not None and timestamp >= seven_day_cutoff
+    )
+    trades = int(feedback_summary.get("live_trades", 0)) + int(feedback_summary.get("replay_trades", 0))
+    skips = int(feedback_summary.get("signal_skips", 0))
+    return {
+        "seed_signals_available": len(seed_signals),
+        "latest_seed_run": latest_seed_run,
+        "live_signals_7d": live_signals_7d,
+        "calibration_basis": feedback_summary.get("calibration_basis", "BOOTSTRAPPING"),
+        "colony_feedback_received": {
+            "trades": trades,
+            "skips": skips,
+        },
+    }
+
+
+def _dashboard_intermarket_context(links: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for link in links:
+        theme = str(link.get("theme") or "")
+        effect = str(link.get("effect") or "")
+        linked = [str(item) for item in link.get("linked", [])]
+        for driver in link.get("drivers", []):
+            driver_text = str(driver)
+            rows.append(
+                {
+                    "theme": theme,
+                    "driver": driver_text,
+                    "direction": _intermarket_direction(driver_text, effect),
+                    "strength": _intermarket_strength(driver_text, theme),
+                    "explanation": _intermarket_explanation(driver_text, effect),
+                    "linked": linked,
+                }
+            )
+    return rows
+
+
+def _intermarket_direction(driver: str, effect: str) -> str:
+    text = f"{driver} {effect}".lower()
+    if "dxy" in text or "usd" in text:
+        return "negatieve druk bij USD-sterkte"
+    if "gold" in text or "risk-off" in text or "real rates" in text:
+        return "risk-off filter"
+    if "qqq" in text or "risk appetite" in text or "btc vs qqq" in text:
+        return "risk-on bevestiging"
+    if "eth/btc" in text:
+        return "crypto rotatie"
+    if any(item in text for item in ["copper", "silver", "aluminium", "semiconductors"]):
+        return "cyclische bevestiging"
+    if any(item in text for item in ["wti", "brent", "natgas"]):
+        return "energie en inflatie"
+    return "context"
+
+
+def _intermarket_strength(driver: str, theme: str) -> str:
+    text = f"{driver} {theme}".lower()
+    if any(item in text for item in ["btc", "dxy", "qqq", "semiconductors", "ai"]):
+        return "hoog"
+    if any(item in text for item in ["copper", "gold", "wti", "brent"]):
+        return "medium"
+    return "laag"
+
+
+def _intermarket_explanation(driver: str, effect: str) -> str:
+    if "BTC vs DXY" in driver:
+        return "BTC vs DXY: negatief gecorreleerd; stijgende DXY zet vaak druk op BTC."
+    if "BTC vs QQQ" in driver:
+        return "BTC vs QQQ: gedeelde groei- en risk-on beta; bevestigt of remt crypto entries."
+    if "ETH/BTC" in driver:
+        return "ETH/BTC: meet rotatie binnen crypto; helpt brede beta van ETH-specifieke kracht scheiden."
+    return effect
+
+
+def _asset_display_name(signal: dict) -> str:
+    asset = str(signal.get("asset") or signal.get("symbol") or "").upper()
+    exchange = str(signal.get("exchange") or "").upper()
+    if exchange:
+        try:
+            listed = asset_universe.get(exchange, asset)
+        except Exception:
+            listed = None
+        if listed:
+            return str(listed.to_dict().get("name") or asset)
+    return asset
+
+
+def _dashboard_ts(signal: dict) -> datetime | None:
+    return _parse_dashboard_ts(signal.get("created_at") or signal.get("timestamp"))
+
+
+def _parse_dashboard_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _positive_signal_item(signal: dict) -> str:
+    direction = escape(str(signal.get("direction", "")))
+    score = f"{float(signal.get('entry_score') or 0.0):.2f}"
+    confidence = f"{float(signal.get('confidence') or 0.0):.2f}"
+    return (
+        "<div class='intel-item'>"
+        "<div class='intel-main'>"
+        f"<span>{escape(str(signal.get('asset', '')))}</span>"
+        f"<span class='{direction}'>{direction.upper()} {score}</span>"
+        "</div>"
+        f"<div class='intel-meta'>conf {confidence} · {escape(str(signal.get('time_window') or 'n/a'))}</div>"
+        f"<div class='intel-reason'>{escape(str(signal.get('reason_preview') or ''))}</div>"
+        "</div>"
+    )
+
+
+def _recommended_asset_item(asset: dict) -> str:
+    latest = asset.get("latest_signal") or "n/a"
+    return (
+        "<div class='intel-item'>"
+        "<div class='intel-main'>"
+        f"<span>{escape(str(asset.get('name') or asset.get('asset') or ''))}</span>"
+        f"<span>{escape(str(asset.get('bias', 'MIXED')))}</span>"
+        "</div>"
+        "<div class='intel-meta'>"
+        f"score {float(asset.get('avg_entry_score') or 0.0):.2f} · "
+        f"conf {float(asset.get('avg_confidence') or 0.0):.2f} · "
+        f"{int(asset.get('signal_count') or 0)} signalen"
+        "</div>"
+        f"<div class='intel-reason'>Laatste: {escape(str(latest))}</div>"
+        f"<div class='intel-reason'>Waarom: {escape(str(asset.get('reason_preview') or 'score en bias boven drempel'))}</div>"
+        "</div>"
+    )
+
+
+def _backtest_status_card(status: dict) -> str:
+    feedback = status.get("colony_feedback_received") or {}
+    return (
+        "<div class='status-grid'>"
+        f"<div class='status-cell'><span class='label'>Seed signalen</span><span class='status-number'>{int(status.get('seed_signals_available') or 0)}</span></div>"
+        f"<div class='status-cell'><span class='label'>Live 7 dagen</span><span class='status-number'>{int(status.get('live_signals_7d') or 0)}</span></div>"
+        f"<div class='status-cell'><span class='label'>Trades</span><span class='status-number'>{int(feedback.get('trades') or 0)}</span></div>"
+        f"<div class='status-cell'><span class='label'>Skips</span><span class='status-number'>{int(feedback.get('skips') or 0)}</span></div>"
+        "</div>"
+        f"<div class='intel-item'><div class='intel-meta'>Calibration basis</div><div class='intel-main'>{escape(str(status.get('calibration_basis') or 'BOOTSTRAPPING'))}</div></div>"
+        f"<div class='intel-item'><div class='intel-meta'>Laatste seed run</div><div class='intel-reason'>{escape(str(status.get('latest_seed_run') or 'n/a'))}</div></div>"
+    )
 
 
 def _signal_row(signal: dict) -> str:
@@ -1201,6 +1612,17 @@ def _intermarket_link_row(link: dict) -> str:
         f"<td><div class='chips'>{drivers}</div></td>"
         f"<td><div class='chips'>{linked}</div></td>"
         f"<td>{escape(str(link.get('effect', '')))}</td>"
+        "</tr>"
+    )
+
+
+def _intermarket_context_row(link: dict) -> str:
+    return (
+        "<tr>"
+        f"<td>{escape(str(link.get('driver', '')))}</td>"
+        f"<td>{escape(str(link.get('direction', '')))}</td>"
+        f"<td>{escape(str(link.get('strength', '')))}</td>"
+        f"<td>{escape(str(link.get('explanation', '')))}</td>"
         "</tr>"
     )
 
