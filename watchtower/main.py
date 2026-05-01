@@ -1261,15 +1261,25 @@ def mock_signal() -> dict:
 
 def _dashboard_intelligence() -> dict:
     recent_signals = store.list_signals(limit=250)
-    latest_50 = store.list_signals(limit=50)
+    latest_24h = _signals_since(recent_signals, timedelta(hours=24))[:50]
     feedback_summary = store.colony_feedback_stats()
     return {
         "positive_signals": _positive_signals(recent_signals),
-        "recommended_assets": _recommended_assets(latest_50),
+        "recommended_assets": _recommended_assets(latest_24h),
         "backtest_status": _backtest_status(recent_signals, feedback_summary),
         "colony_feedback_summary": feedback_summary,
         "intermarket_context": _dashboard_intermarket_context(intermarket_engine.dashboard_links()),
     }
+
+
+def _signals_since(signals: list[dict], window: timedelta) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - window
+    recent = []
+    for signal in signals:
+        timestamp = _dashboard_ts(signal)
+        if timestamp is not None and timestamp >= cutoff:
+            recent.append(signal)
+    return recent
 
 
 def _positive_signals(signals: list[dict]) -> list[dict]:

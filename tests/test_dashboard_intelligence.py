@@ -59,6 +59,19 @@ def test_dashboard_intelligence_recommended_assets_require_min_avg_score(monkeyp
     assert assets["BTC-EUR"]["avg_entry_score"] == 0.7
 
 
+def test_dashboard_intelligence_recommended_assets_use_last_24h(monkeypatch):
+    store = _patch_store(monkeypatch)
+    now = datetime.now(timezone.utc)
+    store.save_signal(_signal("sig-old-high", "BTC-EUR", "long", 0.95, now - timedelta(days=2)))
+    store.save_signal(_signal("sig-recent", "GLD", "long", 0.62, now))
+    client = TestClient(app)
+
+    data = client.get("/dashboard/intelligence").json()
+
+    assets = {item["asset"] for item in data["recommended_assets"]}
+    assert assets == {"GLD"}
+
+
 def test_dashboard_intelligence_counts_seed_and_colony_feedback(monkeypatch):
     store = _patch_store(monkeypatch)
     data_dir = _data_dir("seed")
