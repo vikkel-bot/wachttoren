@@ -33,6 +33,7 @@ from watchtower.services.colony import DEFAULT_COLONY_CONFIG, ColonyBridge
 from watchtower.services.connectors import ConnectorRegistry, RateLimitError
 from watchtower.services.exchanges import ExchangeUniverse, TradingSessionDetector
 from watchtower.services.intermarket import IntermarketEngine
+from watchtower.services.live_refresh import PeriodicWatchtowerScheduler, WatchtowerLiveRefresher
 from watchtower.services.market_context import MarketContextEngine
 from watchtower.services.news_radar import NewsRadar
 from watchtower.services.news_loader import HistoricalNewsLoader
@@ -70,9 +71,43 @@ news_radar = NewsRadar(asset_universe, monthly_budget_eur=25.0)
 COLONY_CONFIG_KEY = "colony_config"
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+live_refresher = WatchtowerLiveRefresher(
+    store=store,
+    connectors=connectors,
+    asset_universe=asset_universe,
+    exchange_universe=exchange_universe,
+    score_signal=lambda event, market, exchange, asset_info: _score_signal(event, market, exchange, asset_info),
+)
+live_scheduler = PeriodicWatchtowerScheduler(
+    live_refresher,
+    tick_seconds=_env_float("WATCHTOWER_SCHEDULER_TICK_SECONDS", 60.0),
+    enabled=_env_flag("WATCHTOWER_SCHEDULER_ENABLED", True),
+)
+
+
 @app.on_event("startup")
 def startup() -> None:
     store.init_schema()
+    live_scheduler.start(run_immediately=_env_flag("WATCHTOWER_REFRESH_ON_START", False))
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    live_scheduler.stop()
 
 
 @app.get("/health")
@@ -1695,36 +1730,21 @@ def _clamp_score(value: float) -> float:
 
 def _build_best_entries(asset_class: str) -> list[dict]:
     entries: list[dict] = []
-    assets_by_exchange: dict[str, list[dict]] = {}
-    for listed_asset in asset_universe.list(asset_class=asset_class):
-        assets_by_exchange.setdefault(listed_asset["exchange"], []).append(listed_asset)
-
-    for exchange_code, listed_assets in sorted(assets_by_exchange.items()):
-        exchange = exchange_universe.get(exchange_code)
-        if not exchange:
+    best_by_exchange: dict[str, dict] = {}
+    for signal in store.list_signals(limit=250):
+        signal_asset_class = str(signal.get("asset_class") or _infer_asset_class(str(signal.get("asset") or ""))).lower()
+        if signal_asset_class != asset_class:
             continue
-        best_entry: dict | None = None
-        for listed_asset in listed_assets:
-            event = connectors.fetch_news(
-                connector="mock-regional-news",
-                asset=listed_asset["symbol"],
-                exchange=exchange.code,
-                limit=1,
-            )[0]
-            market = connectors.fetch_market(
-                connector="mock-regional-market",
-                asset=listed_asset["symbol"],
-                exchange=exchange.code,
-            )
-            signal = _score_signal(event, market, exchange, listed_asset)
-            signal["benchmark_change_1d_pct"] = market.benchmark_change_1d_pct
-            signal["asset_class"] = asset_class
-            signal["asset_name"] = listed_asset["name"]
-            if best_entry is None or _entry_rank(signal) > _entry_rank(best_entry):
-                best_entry = signal
-        if best_entry:
-            entries.append(best_entry)
-    return entries
+        exchange_code = str(signal.get("exchange") or "GLOBAL").upper()
+        asset = str(signal.get("asset") or "").upper()
+        entry = dict(signal)
+        listed = asset_universe.get(exchange_code, asset) if exchange_code != "GLOBAL" else None
+        entry["asset_name"] = listed.to_dict().get("name") if listed else asset
+        entry["benchmark_change_1d_pct"] = float(entry.get("benchmark_change_1d_pct") or 0.0)
+        if exchange_code not in best_by_exchange or _entry_rank(entry) > _entry_rank(best_by_exchange[exchange_code]):
+            best_by_exchange[exchange_code] = entry
+    entries.extend(best_by_exchange.values())
+    return sorted(entries, key=_entry_rank, reverse=True)
 
 
 def _entry_rank(signal: dict) -> tuple[float, float]:

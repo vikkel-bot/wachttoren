@@ -14,6 +14,8 @@ SOURCE_SCORES = {
     "sec": 0.95,
     "company-pr": 0.82,
     "exchange": 0.82,
+    "bbc-business": 0.82,
+    "bbc-technology": 0.82,
     "example-news": 0.65,
     "unknown": 0.45,
 }

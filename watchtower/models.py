@@ -45,6 +45,11 @@ class MarketSnapshotIn(BaseModel):
     asset: str
     exchange: str | None = None
     price: float = Field(gt=0)
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
     change_15m_pct: float = 0.0
     change_1h_pct: float = 0.0
     change_1d_pct: float = 0.0
@@ -62,6 +67,11 @@ class MarketSnapshotIn(BaseModel):
         return MarketSnapshot(
             asset=(asset or self.asset).upper(),
             price=self.price,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
             change_15m_pct=self.change_15m_pct,
             change_1h_pct=self.change_1h_pct,
             change_1d_pct=self.change_1d_pct,
@@ -91,7 +101,7 @@ class OutcomeIn(BaseModel):
 
 
 class ConnectorFetchIn(BaseModel):
-    connector: str = "mock-news"
+    connector: str = "bbc-business"
     asset: str = "AAPL"
     exchange: str | None = None
     limit: int = Field(default=10, ge=1, le=50)
@@ -102,7 +112,7 @@ class ConnectorFetchIn(BaseModel):
 
 
 class NewsRadarScanIn(BaseModel):
-    mode: str = "mock"
+    mode: str = "rss"
     queries: list[str] = Field(default_factory=list)
     rss_urls: list[str] = Field(default_factory=list)
     limit: int = Field(default=25, ge=1, le=100)
@@ -112,7 +122,7 @@ class NewsRadarScanIn(BaseModel):
 
 
 class MarketConnectorFetchIn(BaseModel):
-    connector: str = "mock-market"
+    connector: str = "yfinance-market"
     asset: str = "AAPL"
     exchange: str | None = None
     ingest: bool = True
@@ -153,8 +163,8 @@ class EntityResolveIn(BaseModel):
 class PipelineRunIn(BaseModel):
     exchange: str | None = None
     region: str | None = None
-    news_connector: str = "mock-news"
-    market_connector: str = "mock-market"
+    news_connector: str = "bbc-business"
+    market_connector: str = "yfinance-market"
     max_assets: int = Field(default=25, ge=1, le=250)
     max_events_per_asset: int = Field(default=1, ge=1, le=10)
     persist: bool = True
@@ -164,8 +174,8 @@ class GlobalPipelineRunIn(BaseModel):
     exchanges: list[str] | None = None
     regions: list[str] | None = None
     asset_classes: list[str] | None = None
-    news_connector: str = "mock-regional-news"
-    market_connector: str = "mock-regional-market"
+    news_connector: str = "bbc-business"
+    market_connector: str = "yfinance-market"
     max_assets_per_exchange: int = Field(default=5, ge=1, le=100)
     max_events_per_asset: int = Field(default=1, ge=1, le=10)
     persist: bool = True

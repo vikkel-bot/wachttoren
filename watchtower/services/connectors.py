@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import time
@@ -18,6 +20,24 @@ from uuid import uuid4
 from watchtower.domain import MarketSnapshot, NewsEvent, utc_now
 from watchtower.services.crypto_market import CryptoMarketAdapter
 from watchtower.services.resolver import AssetResolver
+
+log = logging.getLogger("watchtower.connectors")
+
+BBC_RSS_FEEDS = {
+    "bbc-business": "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "bbc-technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+}
+
+YFINANCE_TICKER_ALIASES = {
+    "GOLD": "GLD",
+    "SILVER": "SLV",
+    "COPPER": "CPER",
+    "WTI": "USO",
+    "BRENT": "BNO",
+    "NATGAS": "UNG",
+    "ASML": "ASML.AS",
+    "INGA": "INGA.AS",
+}
 
 
 POSITIVE_WORDS = {
@@ -101,7 +121,8 @@ def _clamp(value: float, minimum: float = -1.0, maximum: float = 1.0) -> float:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
     except (TypeError, ValueError):
         return default
 
@@ -496,6 +517,73 @@ class EODHDNewsConnector:
             return json.loads(response.read().decode("utf-8"))
 
 
+class YahooFinanceMarketConnector:
+    """Read-only market snapshots via yfinance daily OHLCV."""
+
+    def __init__(
+        self,
+        fetch_history: Callable[[str, str, str], Any] | None = None,
+    ) -> None:
+        self._fetch_history = fetch_history or self._yfinance_history
+
+    def map_ticker(self, asset: str) -> str:
+        normalized = asset.strip().upper().replace("/", "-").replace("_", "-")
+        if normalized in YFINANCE_TICKER_ALIASES:
+            return YFINANCE_TICKER_ALIASES[normalized]
+        return normalized
+
+    def fetch(self, asset: str, period: str = "5d", interval: str = "1d") -> MarketSnapshot:
+        ticker = self.map_ticker(asset)
+        df = self._fetch_history(ticker, period, interval)
+        if df is None or getattr(df, "empty", True):
+            raise ValueError(f"no yfinance data for {asset} ({ticker})")
+
+        rows = []
+        for _idx, row in df.iterrows():
+            close = _safe_float(row.get("Close"), 0.0)
+            if close <= 0:
+                continue
+            rows.append(row)
+        if not rows:
+            raise ValueError(f"no valid yfinance close prices for {asset} ({ticker})")
+
+        last = rows[-1]
+        prev = rows[-2] if len(rows) >= 2 else rows[-1]
+        open_price = _safe_float(last.get("Open"), _safe_float(last.get("Close"), 0.0))
+        high = _safe_float(last.get("High"), open_price)
+        low = _safe_float(last.get("Low"), open_price)
+        close = _safe_float(last.get("Close"), open_price)
+        volume = _safe_float(last.get("Volume"), 0.0)
+        prev_close = _safe_float(prev.get("Close"), close)
+        change_1d_pct = ((close - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
+        change_open_pct = ((close - open_price) / open_price * 100.0) if open_price > 0 else change_1d_pct
+        previous_volumes = [_safe_float(row.get("Volume"), 0.0) for row in rows[:-1]]
+        avg_volume = sum(previous_volumes) / len(previous_volumes) if previous_volumes else volume
+        volume_zscore = ((volume - avg_volume) / avg_volume) if avg_volume > 0 else 0.0
+        volatility_zscore = ((high - low) / close) if close > 0 else 0.0
+        return MarketSnapshot(
+            asset=asset.upper(),
+            price=close,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            change_15m_pct=0.0,
+            change_1h_pct=round(change_open_pct, 4),
+            change_1d_pct=round(change_1d_pct, 4),
+            volume_zscore=round(volume_zscore, 4),
+            volatility_zscore=round(volatility_zscore, 4),
+            trend_1h=round(_clamp(change_open_pct / 5.0), 4),
+            trend_1d=round(_clamp(change_1d_pct / 5.0), 4),
+        )
+
+    def _yfinance_history(self, ticker: str, period: str, interval: str) -> Any:
+        import yfinance as yf
+
+        return yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+
+
 class ConnectorRegistry:
     def __init__(self, resolver: AssetResolver | None = None) -> None:
         _load_dotenv()
@@ -503,6 +591,7 @@ class ConnectorRegistry:
         self.crypto_market = CryptoMarketAdapter()
         self.alpha_vantage_news = AlphaVantageNewsConnector()
         self.eodhd_news = EODHDNewsConnector()
+        self.yfinance_market = YahooFinanceMarketConnector()
 
     def list_connectors(self) -> list[dict]:
         return [
@@ -523,6 +612,18 @@ class ConnectorRegistry:
                 "type": "news",
                 "requires": ["feed_url"],
                 "description": "Fetches public RSS/Atom-like feeds through urllib.",
+            },
+            {
+                "name": "bbc-business",
+                "type": "news",
+                "requires": [],
+                "description": "BBC Business public RSS feed for production news refresh.",
+            },
+            {
+                "name": "bbc-technology",
+                "type": "news",
+                "requires": [],
+                "description": "BBC Technology public RSS feed for production news refresh.",
             },
             {
                 "name": "alphavantage-news",
@@ -558,6 +659,12 @@ class ConnectorRegistry:
                 "requires": [],
                 "description": "Public Bitvavo crypto ticker and 1h candles for BTC-EUR, ETH-EUR, ETH-BTC and other pairs.",
             },
+            {
+                "name": "yfinance-market",
+                "type": "market",
+                "requires": [],
+                "description": "Real daily OHLCV snapshots via yfinance for equities, ETFs and mapped commodities.",
+            },
         ]
 
     def fetch_news(
@@ -578,6 +685,8 @@ class ConnectorRegistry:
             if not feed_url:
                 raise ValueError("feed_url is required for rss connector")
             return self._rss_news(resolved_asset, feed_url, limit)
+        if connector in BBC_RSS_FEEDS:
+            return self._rss_news(resolved_asset, BBC_RSS_FEEDS[connector], limit, source_name=connector)
         if connector == "alphavantage-news":
             return self.alpha_vantage_news.fetch(resolved_asset, limit=limit, from_dt=from_dt, to_dt=to_dt)
         if connector == "eodhd-news":
@@ -607,6 +716,8 @@ class ConnectorRegistry:
         resolved_asset = self.resolver.resolve(asset)
         if connector in {"bitvavo-public", "crypto-public"}:
             return self.crypto_market.fetch_snapshot(resolved_asset)
+        if connector in {"yfinance-market", "yahoo-finance"}:
+            return self.yfinance_market.fetch(resolved_asset)
         if connector not in {"mock-market", "mock-regional-market"}:
             raise ValueError(f"Unknown market connector: {connector}")
         profile = self._market_profile(exchange)
@@ -698,8 +809,9 @@ class ConnectorRegistry:
         }
         return {**defaults, **overrides.get(exchange_code, {})}
 
-    def _rss_news(self, asset: str, feed_url: str, limit: int) -> list[NewsEvent]:
-        with urllib.request.urlopen(feed_url, timeout=8) as response:
+    def _rss_news(self, asset: str, feed_url: str, limit: int, source_name: str | None = None) -> list[NewsEvent]:
+        request = urllib.request.Request(feed_url, headers={"User-Agent": "watchtower/0.1"})
+        with urllib.request.urlopen(request, timeout=10) as response:
             raw_xml = response.read()
 
         root = ET.fromstring(raw_xml)
@@ -722,14 +834,14 @@ class ConnectorRegistry:
             )
             text = f"{title} {summary}"
             relevance = 0.85 if asset.upper() in text.upper() else 0.45
-            source_name = urllib.parse.urlparse(feed_url).netloc or "rss"
+            source = source_name or urllib.parse.urlparse(feed_url).netloc or "rss"
             events.append(
                 NewsEvent(
-                    id=f"evt_{uuid4().hex[:12]}",
+                    id=_stable_event_id("rss", source, link, published_at.isoformat(), title),
                     asset=asset,
                     headline=title or "Untitled feed item",
                     summary=summary,
-                    source=source_name,
+                    source=source,
                     url=link or None,
                     published_at=published_at,
                     sentiment=naive_sentiment(text),

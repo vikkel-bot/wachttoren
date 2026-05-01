@@ -11,9 +11,9 @@ from watchtower.main import app
 from watchtower.storage import SQLiteStore
 
 
-def test_dashboard_intelligence_empty_database_has_safe_defaults(monkeypatch, tmp_path):
-    _patch_store(monkeypatch, tmp_path)
-    monkeypatch.setenv("WATCHTOWER_DATA_DIR", str(tmp_path / "data"))
+def test_dashboard_intelligence_empty_database_has_safe_defaults(monkeypatch):
+    _patch_store(monkeypatch)
+    monkeypatch.setenv("WATCHTOWER_DATA_DIR", str(_data_dir("empty")))
     client = TestClient(app)
 
     response = client.get("/dashboard/intelligence")
@@ -27,8 +27,8 @@ def test_dashboard_intelligence_empty_database_has_safe_defaults(monkeypatch, tm
     assert data["intermarket_context"]
 
 
-def test_dashboard_intelligence_positive_signals_exclude_neutral(monkeypatch, tmp_path):
-    store = _patch_store(monkeypatch, tmp_path)
+def test_dashboard_intelligence_positive_signals_exclude_neutral(monkeypatch):
+    store = _patch_store(monkeypatch)
     now = datetime.now(timezone.utc)
     store.save_signal(_signal("sig-long", "BTC-EUR", "long", 0.72, now))
     store.save_signal(_signal("sig-neutral", "ETH-EUR", "neutral", 0.88, now))
@@ -43,8 +43,8 @@ def test_dashboard_intelligence_positive_signals_exclude_neutral(monkeypatch, tm
     assert data["positive_signals"][0]["asset"] == "BTC-EUR"
 
 
-def test_dashboard_intelligence_recommended_assets_require_min_avg_score(monkeypatch, tmp_path):
-    store = _patch_store(monkeypatch, tmp_path)
+def test_dashboard_intelligence_recommended_assets_require_min_avg_score(monkeypatch):
+    store = _patch_store(monkeypatch)
     now = datetime.now(timezone.utc)
     store.save_signal(_signal("sig-btc-1", "BTC-EUR", "long", 0.8, now))
     store.save_signal(_signal("sig-btc-2", "BTC-EUR", "long", 0.6, now - timedelta(minutes=5)))
@@ -59,10 +59,10 @@ def test_dashboard_intelligence_recommended_assets_require_min_avg_score(monkeyp
     assert assets["BTC-EUR"]["avg_entry_score"] == 0.7
 
 
-def test_dashboard_intelligence_counts_seed_and_colony_feedback(monkeypatch, tmp_path):
-    store = _patch_store(monkeypatch, tmp_path)
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+def test_dashboard_intelligence_counts_seed_and_colony_feedback(monkeypatch):
+    store = _patch_store(monkeypatch)
+    data_dir = _data_dir("seed")
+    data_dir.mkdir(parents=True)
     monkeypatch.setenv("WATCHTOWER_DATA_DIR", str(data_dir))
     (data_dir / "backtest_signals_seed.jsonl").write_text(
         '{"signal_id":"seed-1","asset":"BTC-EUR","entry_score":0.6}\n'
@@ -95,11 +95,15 @@ def test_dashboard_intelligence_counts_seed_and_colony_feedback(monkeypatch, tmp
     assert data["colony_feedback_summary"]["calibration_basis"] == "BOOTSTRAPPING"
 
 
-def _patch_store(monkeypatch, tmp_path: Path) -> SQLiteStore:
-    store = SQLiteStore(tmp_path / f"watchtower_{uuid4().hex}.sqlite")
+def _patch_store(monkeypatch) -> SQLiteStore:
+    store = SQLiteStore(Path.cwd() / f"test_dashboard_{uuid4().hex}.sqlite")
     store.init_schema()
     monkeypatch.setattr(main_module, "store", store)
     return store
+
+
+def _data_dir(label: str) -> Path:
+    return Path.cwd() / "data" / f"test_dashboard_{label}_{uuid4().hex}"
 
 
 def _signal(

@@ -66,12 +66,20 @@ class NewsRadar:
             notes="Official European Central Bank releases.",
         ),
         RadarSource(
-            name="BBC Business",
+            name="bbc-business",
             kind="headline_rss",
             url="https://feeds.bbci.co.uk/news/business/rss.xml",
             cost_eur_month=0.0,
             reliability=0.82,
             notes="Broad international business headlines.",
+        ),
+        RadarSource(
+            name="bbc-technology",
+            kind="headline_rss",
+            url="https://feeds.bbci.co.uk/news/technology/rss.xml",
+            cost_eur_month=0.0,
+            reliability=0.82,
+            notes="Broad international technology headlines.",
         ),
     ]
 
@@ -155,7 +163,7 @@ class NewsRadar:
 
     def scan(
         self,
-        mode: str = "mock",
+        mode: str = "rss",
         queries: list[str] | None = None,
         rss_urls: list[str] | None = None,
         limit: int = 25,
@@ -242,7 +250,7 @@ class NewsRadar:
 
     def _fetch_rss(self, source: RadarSource, limit: int) -> list[NewsEvent]:
         request = urllib.request.Request(source.url, headers={"User-Agent": "WatchtowerNewsRadar/0.1"})
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             raw_xml = response.read()
 
         root = ET.fromstring(raw_xml)

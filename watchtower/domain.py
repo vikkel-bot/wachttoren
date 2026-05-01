@@ -29,6 +29,11 @@ class NewsEvent:
 class MarketSnapshot:
     asset: str
     price: float
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
     change_15m_pct: float = 0.0
     change_1h_pct: float = 0.0
     change_1d_pct: float = 0.0
