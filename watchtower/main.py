@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -69,6 +70,7 @@ regional_scorer = RegionalEntryScorer(scorer, session_detector)
 intermarket_engine = IntermarketEngine()
 news_radar = NewsRadar(asset_universe, monthly_budget_eur=25.0)
 COLONY_CONFIG_KEY = "colony_config"
+logger = logging.getLogger("watchtower.main")
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -102,6 +104,9 @@ live_scheduler = PeriodicWatchtowerScheduler(
 @app.on_event("startup")
 def startup() -> None:
     store.init_schema()
+    removed = store.dedupe_signals()
+    if removed:
+        logger.info("Watchtower signal dedupe verwijderd %s dubbele signalen", removed)
     live_scheduler.start(run_immediately=_env_flag("WATCHTOWER_REFRESH_ON_START", False))
 
 
@@ -1284,7 +1289,7 @@ def _signals_since(signals: list[dict], window: timedelta) -> list[dict]:
 
 def _positive_signals(signals: list[dict]) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    positive = []
+    positive_by_bucket: dict[tuple[str, str], dict] = {}
     for signal in signals:
         direction = str(signal.get("direction") or "").lower()
         if direction not in {"long", "short"}:
@@ -1292,8 +1297,13 @@ def _positive_signals(signals: list[dict]) -> list[dict]:
         timestamp = _dashboard_ts(signal)
         if timestamp and timestamp < cutoff:
             continue
-        positive.append(_positive_signal_payload(signal, timestamp))
+        payload = _positive_signal_payload(signal, timestamp)
+        key = _dashboard_signal_bucket(payload)
+        existing = positive_by_bucket.get(key)
+        if existing is None or _dashboard_signal_rank(payload) > _dashboard_signal_rank(existing):
+            positive_by_bucket[key] = payload
 
+    positive = list(positive_by_bucket.values())
     positive.sort(key=lambda item: (float(item["entry_score"]), float(item["confidence"])), reverse=True)
     return positive[:10]
 
@@ -1312,6 +1322,26 @@ def _positive_signal_payload(signal: dict, timestamp: datetime | None) -> dict:
         "reason_preview": reason[:80],
         "timestamp": timestamp.isoformat() if timestamp else signal.get("created_at") or signal.get("timestamp"),
     }
+
+
+def _dashboard_signal_bucket(signal: dict) -> tuple[str, str]:
+    asset = str(signal.get("asset") or signal.get("symbol") or "").upper()
+    timestamp = _parse_dashboard_ts(signal.get("timestamp") or signal.get("created_at"))
+    if timestamp is None:
+        return asset, "unknown"
+    bucket = timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return asset, bucket.isoformat()
+
+
+def _dashboard_signal_rank(signal: dict) -> tuple[float, float, datetime]:
+    timestamp = _parse_dashboard_ts(signal.get("timestamp") or signal.get("created_at"))
+    if timestamp is None:
+        timestamp = datetime.min.replace(tzinfo=timezone.utc)
+    return (
+        _safe_float(signal.get("entry_score")),
+        _safe_float(signal.get("confidence")),
+        timestamp.astimezone(timezone.utc),
+    )
 
 
 def _recommended_assets(signals: list[dict]) -> list[dict]:

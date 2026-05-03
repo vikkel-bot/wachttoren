@@ -110,12 +110,39 @@ class SQLiteStore:
 
     def save_signal(self, signal: Any) -> dict[str, Any]:
         payload = to_jsonable(signal)
+        payload["asset"] = str(payload["asset"]).upper()
+        payload.setdefault("created_at", payload.get("timestamp") or datetime.now(timezone.utc).isoformat())
         with self._connect() as conn:
+            payload, should_insert = self._dedupe_signal_before_insert(conn, payload)
+            if not should_insert:
+                return payload
             conn.execute(
                 "INSERT OR REPLACE INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
                 (payload["id"], payload["asset"], payload["created_at"], json.dumps(payload)),
             )
         return payload
+
+    def dedupe_signals(self) -> int:
+        """Keep only the strongest signal per asset per UTC hour."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, payload FROM signals ORDER BY created_at DESC").fetchall()
+            buckets: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+            for row in rows:
+                payload = json.loads(row["payload"])
+                key = self._signal_dedupe_key(payload)
+                if key is None:
+                    continue
+                buckets.setdefault(key, []).append((row["id"], payload))
+
+            delete_ids: list[str] = []
+            for entries in buckets.values():
+                if len(entries) <= 1:
+                    continue
+                keep_id, _keep_payload = max(entries, key=lambda item: self._signal_rank(item[1]))
+                delete_ids.extend(row_id for row_id, _payload in entries if row_id != keep_id)
+
+            self._delete_signal_ids(conn, delete_ids)
+            return len(delete_ids)
 
     def list_events(
         self,
@@ -571,6 +598,70 @@ class SQLiteStore:
         except ValueError:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def _dedupe_signal_before_insert(
+        self,
+        conn: sqlite3.Connection,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        key = self._signal_dedupe_key(payload)
+        if key is None:
+            return payload, True
+
+        asset, _bucket = key
+        signal_id = str(payload.get("id") or "")
+        rows = conn.execute(
+            "SELECT id, payload FROM signals WHERE asset = ? AND id != ?",
+            (asset, signal_id),
+        ).fetchall()
+        duplicates: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            existing = json.loads(row["payload"])
+            if self._signal_dedupe_key(existing) == key:
+                duplicates.append((row["id"], existing))
+        if not duplicates:
+            return payload, True
+
+        candidate_id = signal_id or "__incoming__"
+        candidates = [(candidate_id, payload, True), *[(row_id, existing, False) for row_id, existing in duplicates]]
+        keep_id, keep_payload, keep_is_incoming = max(candidates, key=lambda item: self._signal_rank(item[1]))
+        delete_ids = [row_id for row_id, _existing in duplicates if row_id != keep_id]
+        if keep_is_incoming:
+            delete_ids = [row_id for row_id, _existing in duplicates]
+        self._delete_signal_ids(conn, delete_ids)
+        return keep_payload, keep_is_incoming
+
+    def _delete_signal_ids(self, conn: sqlite3.Connection, signal_ids: list[str]) -> None:
+        if not signal_ids:
+            return
+        placeholders = ",".join("?" for _item in signal_ids)
+        conn.execute(f"DELETE FROM signals WHERE id IN ({placeholders})", tuple(signal_ids))
+
+    def _signal_dedupe_key(self, payload: dict[str, Any]) -> tuple[str, str] | None:
+        asset = str(payload.get("asset") or payload.get("symbol") or "").upper()
+        if not asset:
+            return None
+        timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
+        if timestamp is None:
+            return None
+        bucket = timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        return asset, bucket.isoformat()
+
+    def _signal_rank(self, payload: dict[str, Any]) -> tuple[float, float, datetime]:
+        timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
+        if timestamp is None:
+            timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        return (
+            self._safe_float(payload.get("entry_score")),
+            self._safe_float(payload.get("confidence")),
+            timestamp.astimezone(timezone.utc),
+        )
+
+    def _safe_float(self, value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _watchlist_key(self, exchange: str, asset: str) -> str:
         return f"{exchange.upper()}:{asset.upper()}"

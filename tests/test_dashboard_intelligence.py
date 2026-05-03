@@ -56,7 +56,26 @@ def test_dashboard_intelligence_recommended_assets_require_min_avg_score(monkeyp
     assets = {item["asset"]: item for item in data["recommended_assets"]}
     assert set(assets) == {"BTC-EUR"}
     assert assets["BTC-EUR"]["bias"] == "LONG"
-    assert assets["BTC-EUR"]["avg_entry_score"] == 0.7
+    assert assets["BTC-EUR"]["avg_entry_score"] == 0.8
+    assert assets["BTC-EUR"]["signal_count"] == 1
+
+
+def test_dashboard_intelligence_dedupes_positive_signals_per_asset_hour(monkeypatch):
+    store = _patch_store(monkeypatch)
+    now = datetime.now(timezone.utc).replace(minute=20, second=0, microsecond=0)
+    duplicated = [
+        _signal("sig-eth-low", "ETH-EUR", "long", 0.62, now),
+        _signal("sig-eth-high", "ETH-EUR", "long", 0.74, now + timedelta(minutes=10)),
+        _signal("sig-btc", "BTC-EUR", "long", 0.71, now),
+    ]
+    monkeypatch.setattr(store, "list_signals", lambda *args, **kwargs: duplicated)
+    client = TestClient(app)
+
+    data = client.get("/dashboard/intelligence").json()
+
+    eth_signals = [signal for signal in data["positive_signals"] if signal["asset"] == "ETH-EUR"]
+    assert len(eth_signals) == 1
+    assert eth_signals[0]["signal_id"] == "sig-eth-high"
 
 
 def test_dashboard_intelligence_recommended_assets_use_last_24h(monkeypatch):

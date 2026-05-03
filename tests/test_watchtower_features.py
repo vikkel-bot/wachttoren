@@ -155,6 +155,45 @@ class WatchlistStorageTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_save_signal_dedupes_one_asset_per_hour(self) -> None:
+        db_path = Path.cwd() / f"test_signal_dedupe_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+            base_signal = {
+                "id": "sig_low",
+                "event_id": "evt_low",
+                "asset": "ETH-EUR",
+                "exchange": "BITVAVO",
+                "region": "Crypto",
+                "direction": "long",
+                "entry_score": 0.55,
+                "confidence": 0.6,
+                "time_window": "1h",
+                "reason": "test",
+                "risk_flags": [],
+                "components": {},
+                "created_at": "2026-04-28T10:12:00+00:00",
+            }
+
+            store.save_signal(base_signal)
+            store.save_signal(
+                {
+                    **base_signal,
+                    "id": "sig_high",
+                    "event_id": "evt_high",
+                    "entry_score": 0.72,
+                    "created_at": "2026-04-28T10:48:00+00:00",
+                }
+            )
+
+            signals = store.list_signals(limit=10, asset="ETH-EUR")
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["id"], "sig_high")
+            self.assertEqual(signals[0]["entry_score"], 0.72)
+        finally:
+            db_path.unlink(missing_ok=True)
+
 
 class ExchangeUniverseTests(unittest.TestCase):
     def test_universe_includes_target_regions(self) -> None:

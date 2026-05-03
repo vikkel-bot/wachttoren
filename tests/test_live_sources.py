@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -180,8 +183,45 @@ def test_scheduler_tick_fetches_bbc_and_yfinance_then_scores_signal():
         events = store.list_events(limit=5, asset="AAPL")
         assert events[0]["source"] == "bbc-business"
         assert events[0]["url"] == "https://example.com/apple-ai"
+        assert "news_radar" in events[0]["tags"]
+        assert events[0]["metadata"]["radar"]["source_kind"] == "headline_rss"
         signals = store.list_signals(limit=5, asset="AAPL")
         assert signals[0]["direction"] == "long"
         assert signals[0]["event_id"] == events[0]["id"]
     finally:
         db_path.unlink(missing_ok=True)
+
+
+def test_scheduler_logs_refresh_cycle_start_and_end(caplog):
+    class FakeRefresher:
+        def tick(self):
+            return {"news_articles": 2, "assets_updated": 3, "signals_created": 1, "errors": []}
+
+    scheduler = PeriodicWatchtowerScheduler(FakeRefresher(), enabled=False)  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.INFO, logger="watchtower.live_refresh"):
+        scheduler._tick_safe()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Watchtower refresh start" in message for message in messages)
+    assert any("Watchtower refresh einde | status=ok" in message for message in messages)
+
+
+def test_scheduler_start_restarts_dead_thread():
+    class FakeRefresher:
+        def tick(self):
+            return {"news_articles": 0, "assets_updated": 0, "signals_created": 0, "errors": []}
+
+    scheduler = PeriodicWatchtowerScheduler(FakeRefresher(), tick_seconds=1, enabled=True)  # type: ignore[arg-type]
+    dead_thread = threading.Thread(target=lambda: None)
+    dead_thread.start()
+    dead_thread.join(timeout=1)
+    scheduler._thread = dead_thread
+
+    scheduler.start()
+    try:
+        time.sleep(0.02)
+        assert scheduler._thread is not None
+        assert scheduler._thread.is_alive()
+    finally:
+        scheduler.stop()

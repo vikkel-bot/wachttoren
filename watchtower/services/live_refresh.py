@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -151,8 +152,9 @@ class WatchtowerLiveRefresher:
                 signal["id"] = self._signal_id(event, market)
                 signal["event_id"] = event.id
                 signal["source_field"] = signal.get("source_field") or signal.get("asset_class") or "equity"
-                self.store.save_signal(signal)
-                created += 1
+                saved = self.store.save_signal(signal)
+                if saved.get("id") == signal["id"]:
+                    created += 1
         return created
 
     def _match_event_to_watchlist(self, event: NewsEvent, item: dict[str, Any]) -> NewsEvent | None:
@@ -169,13 +171,28 @@ class WatchtowerLiveRefresher:
             "asset": asset,
             "keywords": sorted(keywords),
         }
+        metadata.setdefault(
+            "radar",
+            {
+                "impact_score": round(max(event.relevance, abs(event.sentiment), 0.5), 4),
+                "impact": "medium" if event.relevance >= 0.6 else "low",
+                "urgency": 0.7,
+                "themes": ["live_rss"],
+                "source_kind": "headline_rss",
+                "source_reliability": 0.82 if event.source.startswith("bbc-") else 0.7,
+                "matched_asset": {
+                    "exchange": str(item.get("exchange") or "GLOBAL").upper(),
+                    "symbol": asset,
+                },
+            },
+        )
         event_id = self._event_id(event, asset)
         return replace(
             event,
             id=event_id,
             asset=asset,
             relevance=max(event.relevance, 0.72),
-            tags=sorted(set([*event.tags, "watchlist_match"])),
+            tags=sorted(set([*event.tags, "watchlist_match", "news_radar", "live_rss"])),
             metadata=metadata,
         )
 
@@ -257,8 +274,12 @@ class PeriodicWatchtowerScheduler:
         self._thread: threading.Thread | None = None
 
     def start(self, *, run_immediately: bool = False) -> None:
-        if not self.enabled or self._thread:
+        if not self.enabled:
             return
+        if self._thread and self._thread.is_alive():
+            return
+        if self._thread and not self._thread.is_alive():
+            self.logger.error("Watchtower refresh scheduler thread was stopped; restarting.")
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -278,13 +299,35 @@ class PeriodicWatchtowerScheduler:
         return self.refresher.tick(force=force)
 
     def _run(self, run_immediately: bool) -> None:
-        if run_immediately:
-            self._tick_safe()
-        while not self._stop.wait(self.tick_seconds):
-            self._tick_safe()
+        try:
+            if run_immediately:
+                self._tick_safe()
+            while not self._stop.wait(self.tick_seconds):
+                self._tick_safe()
+        except Exception:
+            self.logger.exception("Watchtower refresh scheduler stopped unexpectedly.")
+        finally:
+            self._thread = None
 
     def _tick_safe(self) -> None:
+        started_at = datetime.now(timezone.utc)
+        t0 = time.monotonic()
+        self.logger.info("Watchtower refresh start | at=%s", started_at.isoformat())
         try:
-            self.refresher.tick()
+            report = self.refresher.tick()
         except Exception as exc:
             self.logger.warning("Watchtower refresh overgeslagen door fout: %s", exc)
+            self.logger.info(
+                "Watchtower refresh einde | status=failed tijd=%.1fs fout=%s",
+                time.monotonic() - t0,
+                exc,
+            )
+        else:
+            self.logger.info(
+                "Watchtower refresh einde | status=ok tijd=%.1fs nieuws=%s assets=%s signalen=%s fouten=%s",
+                time.monotonic() - t0,
+                int(report.get("news_articles") or 0),
+                int(report.get("assets_updated") or 0),
+                int(report.get("signals_created") or 0),
+                len(report.get("errors") or []),
+            )
