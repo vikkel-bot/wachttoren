@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 import time
 from dataclasses import replace
@@ -15,6 +16,40 @@ from watchtower.services.exchanges import ExchangeUniverse
 from watchtower.storage import SQLiteStore
 
 ScoreSignal = Callable[[NewsEvent, MarketSnapshot, Any, dict[str, Any] | None], dict[str, Any]]
+
+_CRYPTO_ARTICLE_KEYWORDS = {
+    "bitcoin",
+    "btc",
+    "ethereum",
+    "ether",
+    "eth",
+    "crypto",
+    "cryptocurrency",
+    "blockchain",
+    "stablecoin",
+    "defi",
+    "web3",
+    "solana",
+}
+
+_COMPANY_OR_SECTOR_KEYWORDS = {
+    "company",
+    "companies",
+    "shares",
+    "stock",
+    "stocks",
+    "sector",
+    "technology",
+    "telecom",
+    "telecommunications",
+    "earnings",
+    "profit",
+    "revenue",
+    "vodafone",
+    "apple",
+    "nvidia",
+    "semiconductor",
+}
 
 
 class WatchtowerLiveRefresher:
@@ -160,7 +195,14 @@ class WatchtowerLiveRefresher:
     def _match_event_to_watchlist(self, event: NewsEvent, item: dict[str, Any]) -> NewsEvent | None:
         keywords = self._keywords(item)
         text = f"{event.headline} {event.summary}".lower()
-        if not any(keyword in text for keyword in keywords):
+        asset_class = self._asset_class(item)
+        crypto_article = self._is_crypto_article(text)
+        company_or_sector_article = self._is_company_or_sector_article(text)
+        if asset_class == "crypto" and not crypto_article:
+            return None
+        if asset_class != "equity" and company_or_sector_article and not crypto_article:
+            return None
+        if not self._matches_keywords(text, keywords):
             return None
         asset = str(item.get("asset") or "").upper()
         if not asset:
@@ -208,6 +250,37 @@ class WatchtowerLiveRefresher:
             keywords.add(str(data.get("name") or "").lower())
             keywords.update(str(alias).lower() for alias in data.get("aliases", []) if alias)
         return {keyword for keyword in keywords if len(keyword) >= 3}
+
+    def _asset_class(self, item: dict[str, Any]) -> str:
+        explicit = str(item.get("asset_class") or "").lower().strip()
+        if explicit:
+            return explicit
+        exchange_code = str(item.get("exchange") or "").upper()
+        asset = str(item.get("asset") or "").upper()
+        listed = self.asset_universe.get(exchange_code, asset) if exchange_code else None
+        if listed:
+            return listed.asset_class.lower()
+        if exchange_code in {"BITVAVO", "BINANCE", "COINBASE", "KRAKEN"}:
+            return "crypto"
+        if asset.endswith(("-EUR", "-USD", "-BTC")) and asset.split("-", 1)[0] in {"BTC", "ETH", "SOL"}:
+            return "crypto"
+        return "equity"
+
+    def _matches_keywords(self, text: str, keywords: set[str]) -> bool:
+        return any(self._keyword_in_text(text, keyword) for keyword in keywords)
+
+    def _keyword_in_text(self, text: str, keyword: str) -> bool:
+        normalized = keyword.lower().strip()
+        if not normalized:
+            return False
+        escaped = re.escape(normalized)
+        return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text) is not None
+
+    def _is_crypto_article(self, text: str) -> bool:
+        return any(self._keyword_in_text(text, keyword) for keyword in _CRYPTO_ARTICLE_KEYWORDS)
+
+    def _is_company_or_sector_article(self, text: str) -> bool:
+        return any(self._keyword_in_text(text, keyword) for keyword in _COMPANY_OR_SECTOR_KEYWORDS)
 
     def _recent_stored_events(self, asset: str) -> list[NewsEvent]:
         events: list[NewsEvent] = []

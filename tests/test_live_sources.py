@@ -192,6 +192,51 @@ def test_scheduler_tick_fetches_bbc_and_yfinance_then_scores_signal():
         db_path.unlink(missing_ok=True)
 
 
+def _match_refresher() -> WatchtowerLiveRefresher:
+    exchange_universe = ExchangeUniverse()
+    return WatchtowerLiveRefresher(
+        store=None,  # type: ignore[arg-type]
+        connectors=None,  # type: ignore[arg-type]
+        asset_universe=ListedAssetUniverse(exchange_universe),
+        exchange_universe=exchange_universe,
+        score_signal=lambda *_args, **_kwargs: {},
+    )
+
+
+def test_technology_rss_article_does_not_match_crypto_assets():
+    refresher = _match_refresher()
+    event = NewsEvent(
+        id="evt-vodafone-tech",
+        asset="GLOBAL",
+        headline="Vodafone launches new network technology solutions",
+        summary="The telecom company says business customers are adopting cloud services.",
+        source="bbc-technology",
+        url="https://example.com/vodafone-tech",
+        published_at=datetime(2026, 4, 28, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert refresher._match_event_to_watchlist(event, {"exchange": "BITVAVO", "asset": "ETH-EUR"}) is None
+    assert refresher._match_event_to_watchlist(event, {"exchange": "BITVAVO", "asset": "SOL-EUR"}) is None
+
+
+def test_explicit_crypto_article_can_match_crypto_asset():
+    refresher = _match_refresher()
+    event = NewsEvent(
+        id="evt-ethereum-chain",
+        asset="GLOBAL",
+        headline="Ethereum blockchain upgrade lifts ether trading",
+        summary="Crypto markets react to new Ethereum network changes.",
+        source="bbc-business",
+        url="https://example.com/ethereum-chain",
+        published_at=datetime(2026, 4, 28, 10, 0, tzinfo=timezone.utc),
+    )
+
+    matched = refresher._match_event_to_watchlist(event, {"exchange": "BITVAVO", "asset": "ETH-EUR"})
+
+    assert matched is not None
+    assert matched.asset == "ETH-EUR"
+
+
 def test_scheduler_logs_refresh_cycle_start_and_end(caplog):
     class FakeRefresher:
         def tick(self):
