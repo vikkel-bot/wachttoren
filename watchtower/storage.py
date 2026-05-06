@@ -49,6 +49,7 @@ class SQLiteStore:
                     id TEXT PRIMARY KEY,
                     asset TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    hour_bucket TEXT,
                     payload TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS outcomes (
@@ -88,6 +89,7 @@ class SQLiteStore:
                 );
                 """
             )
+            self._ensure_signals_schema(conn)
             self._ensure_watchlist_schema(conn)
 
     def save_event(self, event: Any) -> dict[str, Any]:
@@ -116,33 +118,20 @@ class SQLiteStore:
             payload, should_insert = self._dedupe_signal_before_insert(conn, payload)
             if not should_insert:
                 return payload
+            hour_bucket = self._signal_hour_bucket(payload)
             conn.execute(
-                "INSERT OR REPLACE INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
-                (payload["id"], payload["asset"], payload["created_at"], json.dumps(payload)),
+                "INSERT OR REPLACE INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+                (payload["id"], payload["asset"], payload["created_at"], hour_bucket, json.dumps(payload)),
             )
         return payload
 
     def dedupe_signals(self) -> int:
         """Keep only the strongest signal per asset per UTC hour."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, payload FROM signals ORDER BY created_at DESC").fetchall()
-            buckets: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
-            for row in rows:
-                payload = json.loads(row["payload"])
-                key = self._signal_dedupe_key(payload)
-                if key is None:
-                    continue
-                buckets.setdefault(key, []).append((row["id"], payload))
-
-            delete_ids: list[str] = []
-            for entries in buckets.values():
-                if len(entries) <= 1:
-                    continue
-                keep_id, _keep_payload = max(entries, key=lambda item: self._signal_rank(item[1]))
-                delete_ids.extend(row_id for row_id, _payload in entries if row_id != keep_id)
-
-            self._delete_signal_ids(conn, delete_ids)
-            return len(delete_ids)
+            removed = self._dedupe_signals_conn(conn)
+            self._backfill_signal_hour_buckets(conn)
+            self._ensure_signal_unique_index(conn)
+            return removed
 
     def list_events(
         self,
@@ -631,6 +620,26 @@ class SQLiteStore:
         self._delete_signal_ids(conn, delete_ids)
         return keep_payload, keep_is_incoming
 
+    def _dedupe_signals_conn(self, conn: sqlite3.Connection) -> int:
+        rows = conn.execute("SELECT id, payload FROM signals ORDER BY created_at DESC").fetchall()
+        buckets: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+        for row in rows:
+            payload = json.loads(row["payload"])
+            key = self._signal_dedupe_key(payload)
+            if key is None:
+                continue
+            buckets.setdefault(key, []).append((row["id"], payload))
+
+        delete_ids: list[str] = []
+        for entries in buckets.values():
+            if len(entries) <= 1:
+                continue
+            keep_id, _keep_payload = max(entries, key=lambda item: self._signal_rank(item[1]))
+            delete_ids.extend(row_id for row_id, _payload in entries if row_id != keep_id)
+
+        self._delete_signal_ids(conn, delete_ids)
+        return len(delete_ids)
+
     def _delete_signal_ids(self, conn: sqlite3.Connection, signal_ids: list[str]) -> None:
         if not signal_ids:
             return
@@ -641,11 +650,15 @@ class SQLiteStore:
         asset = str(payload.get("asset") or payload.get("symbol") or "").upper()
         if not asset:
             return None
+        bucket = self._signal_hour_bucket(payload)
+        return (asset, bucket) if bucket else None
+
+    def _signal_hour_bucket(self, payload: dict[str, Any]) -> str | None:
         timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
         if timestamp is None:
             return None
         bucket = timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        return asset, bucket.isoformat()
+        return bucket.isoformat()
 
     def _signal_rank(self, payload: dict[str, Any]) -> tuple[float, float, datetime]:
         timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
@@ -665,6 +678,42 @@ class SQLiteStore:
 
     def _watchlist_key(self, exchange: str, asset: str) -> str:
         return f"{exchange.upper()}:{asset.upper()}"
+
+    def _ensure_signals_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+        if "hour_bucket" not in columns:
+            conn.execute("ALTER TABLE signals ADD COLUMN hour_bucket TEXT")
+        self._dedupe_signals_conn(conn)
+        self._backfill_signal_hour_buckets(conn)
+        self._ensure_signal_unique_index(conn)
+
+    def _backfill_signal_hour_buckets(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT id, asset, created_at, payload, hour_bucket FROM signals").fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            payload.setdefault("asset", row["asset"])
+            payload.setdefault("created_at", row["created_at"])
+            hour_bucket = self._signal_hour_bucket(payload)
+            if not hour_bucket:
+                continue
+            asset = str(payload.get("asset") or row["asset"]).upper()
+            if row["hour_bucket"] != hour_bucket or row["asset"] != asset:
+                conn.execute(
+                    "UPDATE signals SET asset = ?, hour_bucket = ? WHERE id = ?",
+                    (asset, hour_bucket, row["id"]),
+                )
+
+    def _ensure_signal_unique_index(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_asset_hour_utc
+            ON signals(asset, hour_bucket)
+            WHERE hour_bucket IS NOT NULL
+            """
+        )
 
     def _ensure_watchlist_schema(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}

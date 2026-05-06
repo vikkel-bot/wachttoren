@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import os
+import json
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch
@@ -209,6 +211,102 @@ class WatchlistStorageTests(unittest.TestCase):
             self.assertEqual(len(signals), 1)
             self.assertEqual(signals[0]["id"], "sig_high")
             self.assertEqual(signals[0]["entry_score"], 0.72)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_init_schema_migrates_signal_hour_bucket_unique_index(self) -> None:
+        db_path = Path.cwd() / f"test_signal_hour_migration_{uuid4().hex}.sqlite"
+        low_signal = {
+            "id": "sig_low",
+            "asset": "BTC-EUR",
+            "created_at": "2026-05-06T07:10:00+00:00",
+            "entry_score": 0.3,
+            "confidence": 0.4,
+        }
+        high_signal = {
+            **low_signal,
+            "id": "sig_high",
+            "created_at": "2026-05-06T07:55:00+00:00",
+            "entry_score": 0.8,
+            "confidence": 0.7,
+        }
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE signals (
+                        id TEXT PRIMARY KEY,
+                        asset TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
+                    ("sig_low", "BTC-EUR", low_signal["created_at"], json.dumps(low_signal)),
+                )
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
+                    ("sig_high", "BTC-EUR", high_signal["created_at"], json.dumps(high_signal)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = SQLiteStore(db_path)
+            store.init_schema()
+
+            signals = store.list_signals(limit=10, asset="BTC-EUR")
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["id"], "sig_high")
+
+            conn = sqlite3.connect(db_path)
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+                indexes = conn.execute("PRAGMA index_list(signals)").fetchall()
+            finally:
+                conn.close()
+
+            self.assertIn("hour_bucket", columns)
+            unique_indexes = {row[1] for row in indexes if row[2]}
+            self.assertIn("idx_signals_asset_hour_utc", unique_indexes)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_signal_unique_index_blocks_same_asset_hour(self) -> None:
+        db_path = Path.cwd() / f"test_signal_unique_index_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+            signal = {
+                "id": "sig_one",
+                "asset": "BTC-EUR",
+                "created_at": "2026-05-06T07:10:00+00:00",
+            }
+            with store._connect() as conn:
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "sig_one",
+                        "BTC-EUR",
+                        "2026-05-06T07:10:00+00:00",
+                        "2026-05-06T07:00:00+00:00",
+                        json.dumps(signal),
+                    ),
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        "INSERT INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            "sig_two",
+                            "BTC-EUR",
+                            "2026-05-06T07:30:00+00:00",
+                            "2026-05-06T07:00:00+00:00",
+                            json.dumps({**signal, "id": "sig_two"}),
+                        ),
+                    )
         finally:
             db_path.unlink(missing_ok=True)
 

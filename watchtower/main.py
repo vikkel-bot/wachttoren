@@ -107,7 +107,7 @@ def startup() -> None:
     removed = store.dedupe_signals()
     if removed:
         logger.info("Watchtower signal dedupe verwijderd %s dubbele signalen", removed)
-    live_scheduler.start(run_immediately=_env_flag("WATCHTOWER_REFRESH_ON_START", False))
+    live_scheduler.start(run_immediately=_env_flag("WATCHTOWER_REFRESH_ON_START", True))
 
 
 @app.on_event("shutdown")

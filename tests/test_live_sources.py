@@ -192,6 +192,109 @@ def test_scheduler_tick_fetches_bbc_and_yfinance_then_scores_signal():
         db_path.unlink(missing_ok=True)
 
 
+def test_scheduler_matches_global_equity_watchlist_to_bbc_alias_after_restart():
+    db_path = Path.cwd() / f"test_live_refresh_global_equity_{uuid4().hex}.sqlite"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    try:
+        store.upsert_watchlist_item(
+            {
+                "exchange": "GLOBAL",
+                "asset": "AAPL",
+                "region": "North America",
+                "currency": "USD",
+                "enabled": True,
+                "min_entry_score": 0.5,
+                "min_confidence": 0.5,
+                "max_signals_per_hour": 5,
+                "notes": "legacy restart watchlist item",
+            }
+        )
+
+        class FakeConnectors:
+            def fetch_news(self, connector: str, asset: str, limit: int = 50, **_kwargs: Any) -> list[NewsEvent]:
+                if connector != "bbc-business":
+                    return []
+                return [
+                    NewsEvent(
+                        id="evt-bbc-apple-restart",
+                        asset=asset,
+                        headline="Apple shares rise as iPhone demand improves",
+                        summary="Technology investors welcome stronger Apple sales.",
+                        source="bbc-business",
+                        url="https://example.com/apple-restart",
+                        published_at=datetime(2026, 5, 6, 7, 0, tzinfo=timezone.utc),
+                        sentiment=0.3,
+                        relevance=0.7,
+                    )
+                ]
+
+            def fetch_market(self, connector: str, asset: str, exchange: str | None = None) -> MarketSnapshot:
+                assert connector == "yfinance-market"
+                assert asset == "AAPL"
+                assert exchange == "GLOBAL"
+                return MarketSnapshot(
+                    asset=asset,
+                    price=181.0,
+                    open=178.0,
+                    high=182.0,
+                    low=177.0,
+                    close=181.0,
+                    volume=1500.0,
+                    change_1h_pct=0.0,
+                    change_1d_pct=1.2,
+                    volume_zscore=0.8,
+                    trend_1h=0.0,
+                    trend_1d=0.24,
+                    timestamp=datetime(2026, 5, 6, 7, 5, tzinfo=timezone.utc),
+                )
+
+        def fake_score(event: NewsEvent, market: MarketSnapshot, exchange: Any, asset_info: dict[str, Any] | None) -> dict[str, Any]:
+            assert event.asset == "AAPL"
+            assert market.asset == "AAPL"
+            assert exchange.code == "NASDAQ"
+            assert asset_info and asset_info["symbol"] == "AAPL"
+            assert asset_info["asset_class"] == "equity"
+            now = datetime(2026, 5, 6, 7, 5, tzinfo=timezone.utc)
+            return {
+                "id": "sig-global-aapl",
+                "event_id": event.id,
+                "asset": "AAPL",
+                "exchange": "NASDAQ",
+                "region": "North America",
+                "asset_class": "equity",
+                "direction": "long",
+                "entry_score": 0.69,
+                "confidence": 0.64,
+                "time_window": "1h",
+                "reason": "global watchlist item resolved to listed equity",
+                "risk_flags": [],
+                "components": {},
+                "created_at": now.isoformat(),
+                "expires_at": (now + timedelta(hours=1)).isoformat(),
+            }
+
+        exchange_universe = ExchangeUniverse()
+        refresher = WatchtowerLiveRefresher(
+            store=store,
+            connectors=FakeConnectors(),  # type: ignore[arg-type]
+            asset_universe=ListedAssetUniverse(exchange_universe),
+            exchange_universe=exchange_universe,
+            score_signal=fake_score,
+        )
+        report = refresher.tick(now=datetime(2026, 5, 6, 7, 10, tzinfo=timezone.utc), force=True)
+
+        assert report["news_articles"] == 1
+        assert report["signals_created"] == 1
+        events = store.list_events(limit=5, asset="AAPL")
+        assert events[0]["source"] == "bbc-business"
+        signals = store.list_signals(limit=5, asset="AAPL")
+        assert signals[0]["exchange"] == "NASDAQ"
+        assert signals[0]["asset_class"] == "equity"
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
 def _match_refresher() -> WatchtowerLiveRefresher:
     exchange_universe = ExchangeUniverse()
     return WatchtowerLiveRefresher(
@@ -217,6 +320,24 @@ def test_technology_rss_article_does_not_match_crypto_assets():
 
     assert refresher._match_event_to_watchlist(event, {"exchange": "BITVAVO", "asset": "ETH-EUR"}) is None
     assert refresher._match_event_to_watchlist(event, {"exchange": "BITVAVO", "asset": "SOL-EUR"}) is None
+
+
+def test_global_equity_watchlist_matches_company_alias():
+    refresher = _match_refresher()
+    event = NewsEvent(
+        id="evt-apple-shares",
+        asset="GLOBAL",
+        headline="Apple shares rise after stronger iPhone demand",
+        summary="The technology company lifted the broader sector.",
+        source="bbc-business",
+        url="https://example.com/apple-shares",
+        published_at=datetime(2026, 5, 6, 7, 0, tzinfo=timezone.utc),
+    )
+
+    matched = refresher._match_event_to_watchlist(event, {"exchange": "GLOBAL", "asset": "AAPL"})
+
+    assert matched is not None
+    assert matched.asset == "AAPL"
 
 
 def test_explicit_crypto_article_can_match_crypto_asset():

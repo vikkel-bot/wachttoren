@@ -176,8 +176,10 @@ class WatchtowerLiveRefresher:
             if not events:
                 events = self._recent_stored_events(asset)
             for event in events[:3]:
-                exchange = self.exchange_universe.get(str(market_item.get("exchange") or "GLOBAL"))
-                asset_info_obj = self.asset_universe.get(exchange.code, asset) if exchange else None
+                requested_exchange = str(market_item.get("exchange") or "GLOBAL").upper()
+                asset_info_obj = self._listed_asset(requested_exchange, asset)
+                exchange_code = asset_info_obj.exchange if asset_info_obj else requested_exchange
+                exchange = self.exchange_universe.get(exchange_code)
                 asset_info = asset_info_obj.to_dict() if asset_info_obj else None
                 try:
                     signal = self.score_signal(event, market, exchange, asset_info)
@@ -244,7 +246,7 @@ class WatchtowerLiveRefresher:
         keywords = {asset.lower()}
         if "-" in asset:
             keywords.add(asset.split("-", 1)[0].lower())
-        listed = self.asset_universe.get(exchange_code, asset) if exchange_code else None
+        listed = self._listed_asset(exchange_code, asset)
         if listed:
             data = listed.to_dict()
             keywords.add(str(data.get("name") or "").lower())
@@ -257,7 +259,7 @@ class WatchtowerLiveRefresher:
             return explicit
         exchange_code = str(item.get("exchange") or "").upper()
         asset = str(item.get("asset") or "").upper()
-        listed = self.asset_universe.get(exchange_code, asset) if exchange_code else None
+        listed = self._listed_asset(exchange_code, asset)
         if listed:
             return listed.asset_class.lower()
         if exchange_code in {"BITVAVO", "BINANCE", "COINBASE", "KRAKEN"}:
@@ -265,6 +267,16 @@ class WatchtowerLiveRefresher:
         if asset.endswith(("-EUR", "-USD", "-BTC")) and asset.split("-", 1)[0] in {"BTC", "ETH", "SOL"}:
             return "crypto"
         return "equity"
+
+    def _listed_asset(self, exchange_code: str, asset: str):
+        if exchange_code:
+            listed = self.asset_universe.get(exchange_code, asset)
+            if listed:
+                return listed
+        resolved = self.asset_universe.resolve(asset)
+        if not resolved:
+            return None
+        return self.asset_universe.get(str(resolved.get("exchange") or ""), str(resolved.get("symbol") or asset))
 
     def _matches_keywords(self, text: str, keywords: set[str]) -> bool:
         return any(self._keyword_in_text(text, keyword) for keyword in keywords)
