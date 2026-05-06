@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import os
 from pathlib import Path
 from datetime import datetime
+from unittest.mock import patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -21,6 +23,13 @@ from watchtower.storage import SQLiteStore
 
 
 class ConnectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_patch = patch.dict(os.environ, {"TEST_MODE": "true"})
+        self._env_patch.start()
+
+    def tearDown(self) -> None:
+        self._env_patch.stop()
+
     def test_mock_news_connector_returns_events(self) -> None:
         events = ConnectorRegistry().fetch_news("mock-news", "AAPL", limit=2, exchange="NASDAQ")
 
@@ -80,6 +89,15 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(snapshot.asset, "ETH-BTC")
         self.assertAlmostEqual(snapshot.price, 0.04)
         self.assertGreater(snapshot.change_1h_pct, 0)
+
+    def test_mock_connectors_hidden_outside_test_mode(self) -> None:
+        with patch.dict(os.environ, {"TEST_MODE": "false"}):
+            registry = ConnectorRegistry()
+            names = {item["name"] for item in registry.list_connectors()}
+            self.assertNotIn("mock-news", names)
+            self.assertNotIn("mock-market", names)
+            with self.assertRaises(ValueError):
+                registry.fetch_news("mock-news", "AAPL")
 
 
 class WatchlistStorageTests(unittest.TestCase):
@@ -262,6 +280,13 @@ class ExchangeUniverseTests(unittest.TestCase):
 
 
 class RegionalScoringTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_patch = patch.dict(os.environ, {"TEST_MODE": "true"})
+        self._env_patch.start()
+
+    def tearDown(self) -> None:
+        self._env_patch.stop()
+
     def test_regional_scorer_adds_exchange_context(self) -> None:
         universe = ExchangeUniverse()
         detector = TradingSessionDetector(universe)
@@ -314,6 +339,13 @@ class RegionalScoringTests(unittest.TestCase):
 
 
 class NewsRadarTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_patch = patch.dict(os.environ, {"TEST_MODE": "true"})
+        self._env_patch.start()
+
+    def tearDown(self) -> None:
+        self._env_patch.stop()
+
     def test_mock_scan_stays_inside_starter_budget(self) -> None:
         radar = NewsRadar(ListedAssetUniverse(ExchangeUniverse()), monthly_budget_eur=25.0)
 
@@ -333,6 +365,12 @@ class NewsRadarTests(unittest.TestCase):
         self.assertEqual(copper_event.asset, "COPPER")
         self.assertIn("metals", copper_event.metadata["radar"]["themes"])
         self.assertIn("technology", copper_event.metadata["radar"]["themes"])
+
+    def test_mock_scan_blocked_outside_test_mode(self) -> None:
+        with patch.dict(os.environ, {"TEST_MODE": "false"}):
+            radar = NewsRadar(ListedAssetUniverse(ExchangeUniverse()))
+            with self.assertRaises(ValueError):
+                radar.scan(mode="mock", limit=4)
 
 
 class RegimeTests(unittest.TestCase):

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from watchtower.domain import NewsEvent, utc_now
 from watchtower.services.assets import ListedAssetUniverse
-from watchtower.services.connectors import naive_sentiment
+from watchtower.services.connectors import naive_sentiment, test_mode_enabled
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +177,8 @@ class NewsRadar:
         events: list[NewsEvent] = []
 
         if mode == "mock":
+            if not test_mode_enabled():
+                raise ValueError("mock news radar mode is only available when TEST_MODE=true")
             events.extend(self._mock_events(limit))
         elif mode in {"free", "gdelt", "rss"}:
             if mode in {"free", "gdelt"}:

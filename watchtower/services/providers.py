@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import os
+
+
+def _test_mode_enabled() -> bool:
+    return os.getenv("TEST_MODE", "false").strip().lower() == "true"
+
 
 class ProviderRegistry:
     def list(self) -> list[dict]:
-        return [
-            {
-                "name": "mock-regional",
-                "types": ["news", "market"],
-                "status": "implemented",
-                "requires": [],
-                "best_for": ["local development", "tests", "pipeline validation"],
-            },
+        providers = [
             {
                 "name": "rss",
                 "types": ["news"],
@@ -47,3 +46,12 @@ class ProviderRegistry:
                 "best_for": ["historical financial news", "delayed global exchange coverage"],
             },
         ]
+        if _test_mode_enabled():
+            providers.insert(0, {
+                "name": "mock-regional",
+                "types": ["news", "market"],
+                "status": "implemented",
+                "requires": [],
+                "best_for": ["local development", "tests", "pipeline validation"],
+            })
+        return providers

@@ -28,6 +28,10 @@ BBC_RSS_FEEDS = {
     "bbc-technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
 }
 
+
+def test_mode_enabled() -> bool:
+    return os.getenv("TEST_MODE", "false").strip().lower() == "true"
+
 YFINANCE_TICKER_ALIASES = {
     "GOLD": "GLD",
     "SILVER": "SLV",
@@ -594,19 +598,7 @@ class ConnectorRegistry:
         self.yfinance_market = YahooFinanceMarketConnector()
 
     def list_connectors(self) -> list[dict]:
-        return [
-            {
-                "name": "mock-news",
-                "type": "news",
-                "requires": [],
-                "description": "Deterministic demo news events for local testing.",
-            },
-            {
-                "name": "mock-regional-news",
-                "type": "news",
-                "requires": [],
-                "description": "Region-aware demo news events for exchange pipeline testing.",
-            },
+        connectors = [
             {
                 "name": "rss",
                 "type": "news",
@@ -642,18 +634,6 @@ class ConnectorRegistry:
                 "description": "EODHD historical financial news with offset pagination.",
             },
             {
-                "name": "mock-market",
-                "type": "market",
-                "requires": [],
-                "description": "Deterministic demo market snapshot for local testing.",
-            },
-            {
-                "name": "mock-regional-market",
-                "type": "market",
-                "requires": [],
-                "description": "Region-aware demo market snapshot for exchange pipeline testing.",
-            },
-            {
                 "name": "bitvavo-public",
                 "type": "market",
                 "requires": [],
@@ -666,6 +646,34 @@ class ConnectorRegistry:
                 "description": "Real daily OHLCV snapshots via yfinance for equities, ETFs and mapped commodities.",
             },
         ]
+        if test_mode_enabled():
+            connectors[0:0] = [
+                {
+                    "name": "mock-news",
+                    "type": "news",
+                    "requires": [],
+                    "description": "Deterministic demo news events for local testing.",
+                },
+                {
+                    "name": "mock-regional-news",
+                    "type": "news",
+                    "requires": [],
+                    "description": "Region-aware demo news events for exchange pipeline testing.",
+                },
+            ]
+            connectors.insert(-2, {
+                "name": "mock-market",
+                "type": "market",
+                "requires": [],
+                "description": "Deterministic demo market snapshot for local testing.",
+            })
+            connectors.insert(-2, {
+                "name": "mock-regional-market",
+                "type": "market",
+                "requires": [],
+                "description": "Region-aware demo market snapshot for exchange pipeline testing.",
+            })
+        return connectors
 
     def fetch_news(
         self,
@@ -680,6 +688,8 @@ class ConnectorRegistry:
         connector = connector.lower()
         resolved_asset = self.resolver.resolve(asset)
         if connector in {"mock-news", "mock-regional-news"}:
+            if not test_mode_enabled():
+                raise ValueError("Mock news connectors are only available when TEST_MODE=true")
             return self._mock_news(resolved_asset, limit, exchange=exchange)
         if connector == "rss":
             if not feed_url:
@@ -720,6 +730,8 @@ class ConnectorRegistry:
             return self.yfinance_market.fetch(resolved_asset)
         if connector not in {"mock-market", "mock-regional-market"}:
             raise ValueError(f"Unknown market connector: {connector}")
+        if not test_mode_enabled():
+            raise ValueError("Mock market connectors are only available when TEST_MODE=true")
         profile = self._market_profile(exchange)
         return MarketSnapshot(
             asset=resolved_asset,
