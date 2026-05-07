@@ -214,6 +214,46 @@ class WatchlistStorageTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_save_signal_ignores_weaker_duplicate_after_stronger_signal(self) -> None:
+        db_path = Path.cwd() / f"test_signal_insert_ignore_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+            strong_signal = {
+                "id": "sig_strong",
+                "event_id": "evt_strong",
+                "asset": "BTC-EUR",
+                "exchange": "BITVAVO",
+                "region": "Crypto",
+                "direction": "long",
+                "entry_score": 0.88,
+                "confidence": 0.7,
+                "time_window": "1h",
+                "reason": "strong",
+                "risk_flags": [],
+                "components": {},
+                "created_at": "2026-05-06T07:12:00+00:00",
+            }
+            weak_signal = {
+                **strong_signal,
+                "id": "sig_weak",
+                "event_id": "evt_weak",
+                "entry_score": 0.58,
+                "confidence": 0.5,
+                "reason": "weak duplicate",
+                "created_at": "2026-05-06T07:45:00+00:00",
+            }
+
+            store.save_signal(strong_signal)
+            returned = store.save_signal(weak_signal)
+
+            signals = store.list_signals(limit=10, asset="BTC-EUR")
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["id"], "sig_strong")
+            self.assertEqual(returned["id"], "sig_strong")
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_init_schema_migrates_signal_hour_bucket_unique_index(self) -> None:
         db_path = Path.cwd() / f"test_signal_hour_migration_{uuid4().hex}.sqlite"
         low_signal = {
@@ -272,6 +312,67 @@ class WatchlistStorageTests(unittest.TestCase):
             self.assertIn("hour_bucket", columns)
             unique_indexes = {row[1] for row in indexes if row[2]}
             self.assertIn("idx_signals_asset_hour_utc", unique_indexes)
+            self.assertIn("idx_signals_asset_created_hour_utc", unique_indexes)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_signal_deduplication_migration_reports_removed_count_and_backup(self) -> None:
+        db_path = Path.cwd() / f"test_signal_deduplication_report_{uuid4().hex}.sqlite"
+        low_signal = {
+            "id": "sig_low",
+            "asset": "SOL-EUR",
+            "created_at": "2026-05-06T08:05:00+00:00",
+            "entry_score": 0.2,
+            "confidence": 0.3,
+        }
+        high_signal = {
+            **low_signal,
+            "id": "sig_high",
+            "created_at": "2026-05-06T08:55:00+00:00",
+            "entry_score": 0.9,
+            "confidence": 0.8,
+        }
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE signals (
+                        id TEXT PRIMARY KEY,
+                        asset TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
+                    ("sig_low", "SOL-EUR", low_signal["created_at"], json.dumps(low_signal)),
+                )
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, payload) VALUES (?, ?, ?, ?)",
+                    ("sig_high", "SOL-EUR", high_signal["created_at"], json.dumps(high_signal)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = SQLiteStore(db_path)
+            report = store.migrate_signal_deduplication()
+
+            signals = store.list_signals(limit=10, asset="SOL-EUR")
+            self.assertEqual(report["removed"], 1)
+            self.assertTrue(report["constraint_active"])
+            self.assertIsNotNone(report["backup_table"])
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["id"], "sig_high")
+
+            conn = sqlite3.connect(db_path)
+            try:
+                backup_count = conn.execute(f'SELECT COUNT(*) FROM "{report["backup_table"]}"').fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(backup_count, 2)
         finally:
             db_path.unlink(missing_ok=True)
 
@@ -307,6 +408,45 @@ class WatchlistStorageTests(unittest.TestCase):
                             json.dumps({**signal, "id": "sig_two"}),
                         ),
                     )
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_insert_or_ignore_duplicate_signal_is_graceful(self) -> None:
+        db_path = Path.cwd() / f"test_signal_insert_or_ignore_direct_{uuid4().hex}.sqlite"
+        try:
+            store = SQLiteStore(db_path)
+            store.init_schema()
+            signal = {
+                "id": "sig_one",
+                "asset": "BTC-EUR",
+                "created_at": "2026-05-06T07:10:00+00:00",
+            }
+            with store._connect() as conn:
+                conn.execute(
+                    "INSERT INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "sig_one",
+                        "BTC-EUR",
+                        "2026-05-06T07:10:00+00:00",
+                        "2026-05-06T07:00:00+00:00",
+                        json.dumps(signal),
+                    ),
+                )
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "sig_two",
+                        "BTC-EUR",
+                        "2026-05-06T07:30:00+00:00",
+                        "2026-05-06T07:00:00+00:00",
+                        json.dumps({**signal, "id": "sig_two"}),
+                    ),
+                )
+                self.assertEqual(cursor.rowcount, 0)
+
+            signals = store.list_signals(limit=10, asset="BTC-EUR")
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["id"], "sig_one")
         finally:
             db_path.unlink(missing_ok=True)
 

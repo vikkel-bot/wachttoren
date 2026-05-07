@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -9,6 +10,9 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 def to_jsonable(value: Any) -> Any:
@@ -117,21 +121,38 @@ class SQLiteStore:
         with self._connect() as conn:
             payload, should_insert = self._dedupe_signal_before_insert(conn, payload)
             if not should_insert:
+                logger.debug(
+                    "Signaal genegeerd als duplicaat: %s %s",
+                    payload.get("asset"),
+                    self._signal_hour_key(payload) or "unknown-hour",
+                )
                 return payload
             hour_bucket = self._signal_hour_bucket(payload)
-            conn.execute(
-                "INSERT OR REPLACE INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO signals (id, asset, created_at, hour_bucket, payload) VALUES (?, ?, ?, ?, ?)",
                 (payload["id"], payload["asset"], payload["created_at"], hour_bucket, json.dumps(payload)),
             )
+            if cursor.rowcount == 0:
+                logger.debug(
+                    "Signaal genegeerd als duplicaat: %s %s",
+                    payload.get("asset"),
+                    self._signal_hour_key(payload) or "unknown-hour",
+                )
+                existing = self._get_signal_by_asset_hour(conn, payload["asset"], payload)
+                if existing:
+                    return existing
         return payload
 
     def dedupe_signals(self) -> int:
         """Keep only the strongest signal per asset per UTC hour."""
         with self._connect() as conn:
-            removed = self._dedupe_signals_conn(conn)
-            self._backfill_signal_hour_buckets(conn)
-            self._ensure_signal_unique_index(conn)
-            return removed
+            report = self._migrate_signal_deduplication_conn(conn, backup_if_missing=False)
+            return int(report["removed"])
+
+    def migrate_signal_deduplication(self) -> dict[str, Any]:
+        """One-shot migration for signal deduplication and the UTC-hour unique index."""
+        with self._connect() as conn:
+            return self._migrate_signal_deduplication_conn(conn, backup_if_missing=True)
 
     def list_events(
         self,
@@ -600,12 +621,12 @@ class SQLiteStore:
         asset, _bucket = key
         signal_id = str(payload.get("id") or "")
         rows = conn.execute(
-            "SELECT id, payload FROM signals WHERE asset = ? AND id != ?",
+            "SELECT id, asset, created_at, payload FROM signals WHERE asset = ? AND id != ?",
             (asset, signal_id),
         ).fetchall()
         duplicates: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
-            existing = json.loads(row["payload"])
+            existing = self._signal_payload_from_row(row)
             if self._signal_dedupe_key(existing) == key:
                 duplicates.append((row["id"], existing))
         if not duplicates:
@@ -621,10 +642,10 @@ class SQLiteStore:
         return keep_payload, keep_is_incoming
 
     def _dedupe_signals_conn(self, conn: sqlite3.Connection) -> int:
-        rows = conn.execute("SELECT id, payload FROM signals ORDER BY created_at DESC").fetchall()
+        rows = conn.execute("SELECT id, asset, created_at, payload FROM signals ORDER BY created_at DESC").fetchall()
         buckets: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
         for row in rows:
-            payload = json.loads(row["payload"])
+            payload = self._signal_payload_from_row(row)
             key = self._signal_dedupe_key(payload)
             if key is None:
                 continue
@@ -660,6 +681,12 @@ class SQLiteStore:
         bucket = timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
         return bucket.isoformat()
 
+    def _signal_hour_key(self, payload: dict[str, Any]) -> str | None:
+        timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
+        if timestamp is None:
+            return None
+        return timestamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+
     def _signal_rank(self, payload: dict[str, Any]) -> tuple[float, float, datetime]:
         timestamp = self._parse_ts(payload.get("created_at") or payload.get("timestamp"))
         if timestamp is None:
@@ -680,22 +707,12 @@ class SQLiteStore:
         return f"{exchange.upper()}:{asset.upper()}"
 
     def _ensure_signals_schema(self, conn: sqlite3.Connection) -> None:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
-        if "hour_bucket" not in columns:
-            conn.execute("ALTER TABLE signals ADD COLUMN hour_bucket TEXT")
-        self._dedupe_signals_conn(conn)
-        self._backfill_signal_hour_buckets(conn)
-        self._ensure_signal_unique_index(conn)
+        self._migrate_signal_deduplication_conn(conn, backup_if_missing=True)
 
     def _backfill_signal_hour_buckets(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, asset, created_at, payload, hour_bucket FROM signals").fetchall()
         for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except json.JSONDecodeError:
-                continue
-            payload.setdefault("asset", row["asset"])
-            payload.setdefault("created_at", row["created_at"])
+            payload = self._signal_payload_from_row(row)
             hour_bucket = self._signal_hour_bucket(payload)
             if not hour_bucket:
                 continue
@@ -714,6 +731,89 @@ class SQLiteStore:
             WHERE hour_bucket IS NOT NULL
             """
         )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_asset_created_hour_utc
+            ON signals(asset, strftime('%Y-%m-%dT%H', created_at))
+            WHERE created_at IS NOT NULL
+            """
+        )
+
+    def _migrate_signal_deduplication_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        backup_if_missing: bool,
+    ) -> dict[str, Any]:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+        if "hour_bucket" not in columns:
+            conn.execute("ALTER TABLE signals ADD COLUMN hour_bucket TEXT")
+
+        constraint_missing = not self._signal_unique_constraint_active(conn)
+        backup_table = None
+        signal_count = conn.execute("SELECT COUNT(*) AS count FROM signals").fetchone()["count"]
+        if backup_if_missing and constraint_missing and signal_count:
+            backup_table = self._backup_signals_table(conn)
+
+        removed = self._dedupe_signals_conn(conn)
+        self._backfill_signal_hour_buckets(conn)
+        self._ensure_signal_unique_index(conn)
+        constraint_active = self._signal_unique_constraint_active(conn)
+        if not constraint_active:
+            raise RuntimeError("Watchtower signal unique constraint kon niet worden geactiveerd")
+
+        if removed:
+            logger.info("Watchtower signal migratie verwijderde %s dubbele signalen", removed)
+        return {
+            "removed": removed,
+            "backup_table": backup_table,
+            "constraint_active": constraint_active,
+        }
+
+    def _signal_unique_constraint_active(self, conn: sqlite3.Connection) -> bool:
+        indexes = conn.execute("PRAGMA index_list(signals)").fetchall()
+        return any(row["name"] == "idx_signals_asset_created_hour_utc" and bool(row["unique"]) for row in indexes)
+
+    def _backup_signals_table(self, conn: sqlite3.Connection) -> str:
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        backup_table = f"signals_backup_dedupe_{suffix}_{uuid.uuid4().hex[:8]}"
+        conn.execute(f'CREATE TABLE "{backup_table}" AS SELECT * FROM signals')
+        logger.info("Watchtower signals backup gemaakt vóór dedupe migratie: %s", backup_table)
+        return backup_table
+
+    def _signal_payload_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            payload = json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        keys = set(row.keys())
+        if "asset" in keys and row["asset"]:
+            payload["asset"] = str(row["asset"]).upper()
+        if "created_at" in keys and row["created_at"]:
+            payload["created_at"] = row["created_at"]
+        if "id" in keys and row["id"]:
+            payload.setdefault("id", row["id"])
+        return payload
+
+    def _get_signal_by_asset_hour(
+        self,
+        conn: sqlite3.Connection,
+        asset: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        hour_key = self._signal_hour_key(payload)
+        if not hour_key:
+            return None
+        row = conn.execute(
+            """
+            SELECT payload FROM signals
+            WHERE asset = ? AND strftime('%Y-%m-%dT%H', created_at) = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (asset.upper(), hour_key),
+        ).fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def _ensure_watchlist_schema(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
