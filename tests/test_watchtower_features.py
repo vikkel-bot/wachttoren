@@ -656,6 +656,33 @@ class ColonyBridgeTests(unittest.TestCase):
         self.assertEqual(len(qualified), 1)
         self.assertEqual(qualified[0]["id"], "sig_good")
 
+    def test_colony_allows_commodity_threshold_floor(self) -> None:
+        bridge = ColonyBridge()
+        signals = [
+            {
+                "id": "sig_natgas",
+                "asset": "NATGAS",
+                "asset_class": "commodity",
+                "direction": "long",
+                "entry_score": 0.51,
+                "confidence": 0.51,
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            }
+        ]
+        watchlist = [
+            {
+                "asset": "NATGAS",
+                "enabled": True,
+                "min_entry_score": 0.7,
+                "min_confidence": 0.55,
+            }
+        ]
+
+        qualified = bridge.qualified_signals(signals, watchlist)
+
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(qualified[0]["id"], "sig_natgas")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,10 +10,12 @@ DEFAULT_COLONY_CONFIG = {
     "enabled": True,
     "webhook_url": None,
     "dry_run": True,
-    "min_entry_score": 0.7,
-    "min_confidence": 0.55,
+    "min_entry_score": 0.50,
+    "min_confidence": 0.50,
     "max_batch_size": 25,
 }
+
+_COMMODITY_ASSETS = {"BRENT", "WTI", "NATGAS", "COPPER", "SILVER", "GOLD"}
 
 
 class ColonyBridge:
@@ -45,6 +47,9 @@ class ColonyBridge:
             watch_item = watch_item or {}
             min_entry_score = watch_item.get("min_entry_score", config["min_entry_score"])
             min_confidence = watch_item.get("min_confidence", config["min_confidence"])
+            if _is_commodity_signal(signal):
+                min_entry_score = min(float(min_entry_score), DEFAULT_COLONY_CONFIG["min_entry_score"])
+                min_confidence = min(float(min_confidence), DEFAULT_COLONY_CONFIG["min_confidence"])
             if signal.get("entry_score", 0.0) < min_entry_score:
                 continue
             if signal.get("confidence", 0.0) < min_confidence:
@@ -103,3 +108,11 @@ class ColonyBridge:
             return expires < datetime.now(timezone.utc)
         except ValueError:
             return False
+
+
+def _is_commodity_signal(signal: dict[str, Any]) -> bool:
+    asset_class = str(signal.get("asset_class") or signal.get("source_field") or "").lower()
+    if asset_class in {"commodity", "commodities"}:
+        return True
+    asset = str(signal.get("asset") or signal.get("symbol") or "").upper()
+    return asset in _COMMODITY_ASSETS
