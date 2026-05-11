@@ -26,6 +26,9 @@ log = logging.getLogger("watchtower.connectors")
 BBC_RSS_FEEDS = {
     "bbc-business": "https://feeds.bbci.co.uk/news/business/rss.xml",
     "bbc-technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+    "reuters-commodities": "https://feeds.reuters.com/reuters/UKdomesticNews",
+    "marketwatch-commodities": "https://feeds.content.dowjones.io/public/rss/mw_commodities",
+    "investing-commodities": "https://www.investing.com/rss/news_14.rss",
 }
 
 
