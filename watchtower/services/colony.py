@@ -9,7 +9,7 @@ from typing import Any
 DEFAULT_COLONY_CONFIG = {
     "enabled": True,
     "webhook_url": None,
-    "dry_run": True,
+    "dry_run": False,
     "min_entry_score": 0.50,
     "min_confidence": 0.50,
     "max_batch_size": 25,
