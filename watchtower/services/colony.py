@@ -12,6 +12,8 @@ DEFAULT_COLONY_CONFIG = {
     "dry_run": False,
     "min_entry_score": 0.50,
     "min_confidence": 0.50,
+    "min_entry_score_commodity": 0.35,
+    "min_confidence_commodity": 0.35,
     "max_batch_size": 25,
 }
 
@@ -45,11 +47,18 @@ class ColonyBridge:
                 continue
 
             watch_item = watch_item or {}
-            min_entry_score = watch_item.get("min_entry_score", config["min_entry_score"])
-            min_confidence = watch_item.get("min_confidence", config["min_confidence"])
             if _is_commodity_signal(signal):
-                min_entry_score = min(float(min_entry_score), DEFAULT_COLONY_CONFIG["min_entry_score"])
-                min_confidence = min(float(min_confidence), DEFAULT_COLONY_CONFIG["min_confidence"])
+                min_entry_score = min(
+                    float(watch_item.get("min_entry_score", config["min_entry_score_commodity"])),
+                    float(config["min_entry_score_commodity"]),
+                )
+                min_confidence = min(
+                    float(watch_item.get("min_confidence", config["min_confidence_commodity"])),
+                    float(config["min_confidence_commodity"]),
+                )
+            else:
+                min_entry_score = watch_item.get("min_entry_score", config["min_entry_score"])
+                min_confidence = watch_item.get("min_confidence", config["min_confidence"])
             if signal.get("entry_score", 0.0) < min_entry_score:
                 continue
             if signal.get("confidence", 0.0) < min_confidence:
