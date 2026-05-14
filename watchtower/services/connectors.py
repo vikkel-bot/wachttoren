@@ -28,7 +28,6 @@ BBC_RSS_FEEDS = {
     "bbc-technology": "https://feeds.bbci.co.uk/news/technology/rss.xml",
     "ft-commodities": "https://www.ft.com/rss/home/uk",
     "nasdaq-commodities": "https://www.nasdaq.com/feed/rssoutbound?category=Commodities",
-    "investing-commodities": "https://www.investing.com/rss/news_14.rss",
 }
 
 
