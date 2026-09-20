@@ -147,7 +147,7 @@ class _SeedConnectors:
         return MarketSnapshot(asset=asset, price=62000, trend_1h=0.3, change_1h_pct=1.5)
 
 
-def _score_from_market(event: NewsEvent, market: MarketSnapshot, exchange: Any, asset_info: Any) -> dict[str, Any]:
+def _score_from_market(event: NewsEvent, market: MarketSnapshot, exchange: Any, asset_info: Any, as_of: Any = None) -> dict[str, Any]:
     return {
         "id": f"sig-{event.id}",
         "event_id": event.id,

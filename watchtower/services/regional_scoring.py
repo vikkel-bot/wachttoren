@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from typing import Any
 
 from watchtower.domain import MarketSnapshot, NewsEvent
@@ -14,8 +16,8 @@ class RegionalEntryScorer:
         self.base_scorer = base_scorer
         self.session_detector = session_detector
 
-    def score(self, event: NewsEvent, market: MarketSnapshot, exchange: Exchange | None, asset_info: dict | None = None) -> dict[str, Any]:
-        base = to_jsonable(self.base_scorer.score(event, market))
+    def score(self, event: NewsEvent, market: MarketSnapshot, exchange: Exchange | None, asset_info: dict | None = None, as_of: datetime | None = None) -> dict[str, Any]:
+        base = to_jsonable(self.base_scorer.score(event, market, as_of))
         if not exchange:
             return base
 

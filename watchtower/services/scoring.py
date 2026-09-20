@@ -25,10 +25,10 @@ class EntryScorer:
     def __init__(self, market_context: MarketContextEngine | None = None) -> None:
         self.market_context = market_context or MarketContextEngine()
 
-    def score(self, event: NewsEvent, market: MarketSnapshot) -> EntrySignal:
+    def score(self, event: NewsEvent, market: MarketSnapshot, as_of: datetime | None = None) -> EntrySignal:
         direction = self._direction(event, market)
         source_quality = SOURCE_SCORES.get(event.source.lower(), 0.55)
-        freshness = self._freshness_score(event)
+        freshness = self._freshness_score(event, as_of)
         sentiment_strength = abs(event.sentiment)
         event_quality = clamp(
             (event.relevance * 0.35)
@@ -95,8 +95,9 @@ class EntryScorer:
             return "short"
         return "neutral"
 
-    def _freshness_score(self, event: NewsEvent) -> float:
-        age_minutes = max(0.0, (utc_now() - event.published_at).total_seconds() / 60)
+    def _freshness_score(self, event: NewsEvent, as_of: datetime | None = None) -> float:
+        reference = as_of or utc_now()
+        age_minutes = max(0.0, (reference - event.published_at).total_seconds() / 60)
         if age_minutes <= 15:
             return 1.0
         if age_minutes <= 60:

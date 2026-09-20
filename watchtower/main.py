@@ -1742,8 +1742,8 @@ def _infer_asset_class(asset: str) -> str:
     return "crypto" if "-" in asset else "equity"
 
 
-def _score_signal(event, market, exchange, asset_info: dict | None) -> dict:
-    signal = regional_scorer.score(event, market, exchange, asset_info=asset_info)
+def _score_signal(event, market, exchange, asset_info: dict | None, as_of=None) -> dict:
+    signal = regional_scorer.score(event, market, exchange, asset_info=asset_info, as_of=as_of)
     if not exchange:
         return signal
 

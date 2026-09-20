@@ -139,6 +139,7 @@ def seed_asset(
             payload.market.to_domain(market.asset),
             exchange_obj,
             asset_info,
+            as_of=enriched_event.published_at,
         )
         signal = _as_historical_signal(signal, enriched_event)
         if not signal.get("direction"):
@@ -222,20 +223,21 @@ def _with_backfilled_sentiment(event: NewsEvent, sentiment_events: list[NewsEven
 def _sentiment_for_event(event: NewsEvent, sentiment_events: list[NewsEvent]) -> float | None:
     if not sentiment_events:
         return None
-    same_day = [
-        candidate.sentiment
-        for candidate in sentiment_events
-        if candidate.published_at.date() == event.published_at.date()
+    # Alleen sentiment dat op het eventmoment al bestond. Geen look-ahead.
+    prior = [c for c in sentiment_events if c.published_at < event.published_at]
+    if not prior:
+        return None
+    window = [
+        c.sentiment
+        for c in prior
+        if (event.published_at - c.published_at).total_seconds() <= 24 * 3600
     ]
-    if same_day:
-        return _avg(same_day)
-    closest = min(
-        sentiment_events,
-        key=lambda candidate: abs((candidate.published_at - event.published_at).total_seconds()),
-    )
-    if abs((closest.published_at - event.published_at).total_seconds()) <= 3 * 24 * 3600:
+    if window:
+        return _avg(window)
+    closest = max(prior, key=lambda c: c.published_at)
+    if (event.published_at - closest.published_at).total_seconds() <= 3 * 24 * 3600:
         return closest.sentiment
-    return _avg([candidate.sentiment for candidate in sentiment_events])
+    return None
 
 
 def _evaluation_payload(event: NewsEvent, market: MarketSnapshot) -> SignalEvaluationIn:

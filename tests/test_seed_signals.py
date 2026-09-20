@@ -158,7 +158,7 @@ class _FakeCryptoMarket:
         )
 
 
-def _fake_score_signal(event, market, exchange, asset_info):
+def _fake_score_signal(event, market, exchange, asset_info, as_of=None):
     return {
         "id": f"sig-{event.id}",
         "event_id": event.id,
