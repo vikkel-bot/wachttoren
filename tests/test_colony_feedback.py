@@ -47,6 +47,9 @@ class ColonyFeedbackTests(unittest.TestCase):
         return base
 
     def _create_signal(self, asset: str = "BTC-EUR") -> dict:
+        return self.store.save_signal(self._build_signal(asset))
+
+    def _build_signal(self, asset: str = "BTC-EUR") -> dict:
         scorer = EntryScorer()
         event = NewsEventIn(
             asset=asset,
@@ -62,8 +65,7 @@ class ColonyFeedbackTests(unittest.TestCase):
             change_1d_pct=2.5,
             volume_zscore=2.0,
         ).to_domain(asset)
-        signal = scorer.score(event, market)
-        return self.store.save_signal(to_jsonable(signal))
+        return to_jsonable(scorer.score(event, market))
 
     def test_trade_outcome_without_signal_id(self) -> None:
         resp = self.client.post("/colony/feedback", json=self._trade())
@@ -148,7 +150,7 @@ class ColonyFeedbackTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     def test_backtest_signals_endpoint_exports_colony_ready_payload(self) -> None:
-        signal = self._create_signal(asset="BTC-EUR")
+        signal = self._build_signal(asset="BTC-EUR")
         signal["asset_class"] = "crypto"
         signal["linked_assets"] = ["NASDAQ:QQQ", "FX:DXY", "BITVAVO:ETH-BTC"]
         self.store.save_signal(signal)
